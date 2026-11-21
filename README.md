@@ -7,7 +7,7 @@ in 3D with a screen that shows where you are in the cube): eight complex filters
 three knobs pick a point inside it. The cubes here are original designs; no filter data or names are taken from those
 instruments.
 
-On Melodee's screen it draws its own page: the cube in 3D with the filter's point moving through it, and the filter's
+In hdslaveOS it draws its own page on the MPC's screen: the cube in 3D with the filter's point moving through it, and the filter's
 response as a 3D waterfall (see [The screen](#the-screen)).
 
 ## Signal flow
@@ -108,8 +108,8 @@ discovery does). A preset sets every control. Each one's Output is set so it pla
 
 ## The screen
 
-In Melodee with its plug-in screen (melodee-hdslave's `plugin-screen` branch), Cortex Filter draws its own page in
-place of the parameter list. In another host, or a Melodee without that branch, the parameters are listed as usual.
+In hdslaveOS (hdslave's Melodee fork, its `hdslave` branch), Cortex Filter draws its own page in place of the
+parameter list. In stock Melodee or another host, the parameters are listed as usual.
 
 - **CUBE**, the readout. On the left, the cube in 3D, swaying slowly while sound runs through it: the filter's point
   glowing (the right channel's in magenta when Spread splits them), its trail, the path the LFO will take (dotted),
@@ -193,19 +193,19 @@ tools/artifacts.sh  # what the 8-frame control steps add to a tone under a movin
   hash as it is. The other block sizes must also hash as 128 frames do, whatever the file says. A change meant to change the sound updates them with `make fingerprint-update` (inside the build
   image).
 
-It has also been opened by Melodee's own CLAP host (melodee-hdslave's `clap_check`: an effect, 23 parameters, stereo
+It has also been opened by Melodee's own CLAP host (hdslaveOS's `clap_check`: an effect, 23 parameters, stereo
 in and out, plays and restores its state) and its page drawn by Melodee's `--melodee-plugin-screen`. It has not yet
 been run on the MPC.
 
 ## Install
 
 Copy `build/CortexFilter.clap` to `Melodee/Plugins/hdslave Cortex Filter/hdslave Cortex Filter.clap` on the card, then
-add it to a track's effects. It needs only libc and libm (glibc 2.35 or older).
+add it to a track's effects. It needs only libc and libm, glibc 2.35 or newer (the MPC has 2.39).
 
 ## Credits
 
 - The screen's type: Departure Mono, copyright 2022–2024 Helena Zhang, SIL Open Font License 1.1
   (`licenses/OFL-departure-mono.txt`); its glyphs are rasterized into `src/ui/font.h`.
-- The screen extension's header, `src/melodee_screen.h`, is melodee-hdslave's, MIT.
+- The screen extension's header, `src/melodee_screen.h`, is hdslaveOS's, MIT.
 - CLAP headers: MIT license, `third_party/clap/LICENSE`.
 - The vowel formants are the standard published tenor values (five formants' frequency, level and bandwidth).
