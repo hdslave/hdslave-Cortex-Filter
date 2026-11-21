@@ -742,7 +742,7 @@ void demos (const std::string& folder)
 }
 
 // Melodee's screen: the page draws, follows the sound while it plays and the knobs while it does not, animates
-// only while sound runs, answers the wheel (filters), Push (views) and Minus / Plus (groups), edits, copies and
+// the title while the sound sleeps, answers the wheel (filters), Push (views) and Minus / Plus (groups), edits, copies and
 // restores filters, programs a sequence, fires the sequencer's triggers, names K1-K3, and tells the host what it
 // changed. Its pictures go to OUT_FOLDER/screen-*.png.
 void testScreen (const std::string& folder)
@@ -759,8 +759,17 @@ void testScreen (const std::string& folder)
     canvas.accent = 0xff3ee0ff;
     for (auto& k : canvas.knobs)
         k = { -1, true };
-    uint64_t now = 1000;
+    uint64_t now = 960;
     auto paint = [&] (bool whole = false) { canvas.whole = whole, canvas.now_ms = now; return screen->paint (a.plugin, &canvas); };
+    auto outsideTitleMotion = [&] {
+        auto copy = pixels;
+        for (int y = 1; y < 26; ++y)
+        {
+            const int end = y < 11 ? 164 : 143;
+            std::fill (copy.begin() + y * canvas.stride + 1, copy.begin() + y * canvas.stride + end, 0);
+        }
+        return copy;
+    };
     auto shot = [&] (const char* name) {
         now += 40;
         paint (true);
@@ -786,10 +795,31 @@ void testScreen (const std::string& folder)
         }
     };
 
-    // First paint draws; the same picture again does not, while no sound runs.
+    // Both the planet and the lettering move while the effect sleeps. The lower word stays still and the loop closes.
     CHECK (paint (true));
-    now += 40;
+    const auto first = pixels, still = outsideTitleMotion();
+    const int asleepRequests = processes;
+    now += 20;
     CHECK (! paint());
+    now += 40;
+    CHECK (paint() && outsideTitleMotion() == still);
+    auto titleChanged = [&] (int left, int right, int top, int bottom) {
+        for (int y = top; y < bottom; ++y)
+        {
+            const int row = y * canvas.stride;
+            if (! std::equal (first.begin() + row + left, first.begin() + row + right, pixels.begin() + row + left))
+                return true;
+        }
+        return false;
+    };
+    CHECK (titleChanged (36, 43, 11, 16) && titleChanged (54, 128, 3, 22));
+    CHECK (! titleChanged (140, 184, 12, 22) && ! titleChanged (164, 184, 0, 26));
+    now += 3780;
+    CHECK (paint() && pixels == first && processes == asleepRequests);
+    canvas.shift = true;
+    CHECK (paint() && outsideTitleMotion() != still);
+    canvas.shift = false;
+    CHECK (paint() && pixels == first);
     // CUBE: K1-K3 are Morph, Freq, Transform; the wheel loads the next filter in use (and tells the host, with the
     // edit filter's fields that now show it).
     CHECK ((knobs() == std::vector<clap_id> { a.id ("Morph"), a.id ("Freq"), a.id ("Transform") }));
@@ -842,15 +872,16 @@ void testScreen (const std::string& folder)
     play (1300);
     shot ("cube-sequence");
     a.setup ({ { "Sequence", 0 }, { "Filter", 1 } }, 0.01);
-    // No sound for a while: the page stops moving, and asks for no paints.
+    // No sound for a while: the graphs settle. The next request is for the title.
     a.run (Stereo { std::vector<float> (48000, 0.0f), std::vector<float> (48000, 0.0f) }, 128);
     now += 2000;
     paint();
     now += 500; // no block since: the sound sleeps
     paint();
     const int quietPaints = paints;
-    now += 40;
-    CHECK (! paint() && paints == quietPaints);
+    const auto quiet = outsideTitleMotion();
+    now += 60;
+    CHECK (paint() && paints > quietPaints && outsideTitleMotion() == quiet);
 
     // FILTER: Plus moves to the next group; K1-K3 follow the cursor; Push edits the filter Filter picks (F01 here).
     CHECK (in (MELODEE_SCREEN_NUDGE, 1));
@@ -913,8 +944,7 @@ void testScreen (const std::string& folder)
     canvas.shift = true;
     shot ("cube-shift");
     canvas.shift = false;
-    // MORPH view while the sound sleeps: Freq changed on the KNOBS page, then back to CUBE. The page keeps asking for
-    // paints until its landscape has caught up, then stops; painting more changes nothing.
+    // Freq changed on KNOBS while asleep: the MORPH landscape catches up over four paints, then only the title moves.
     CHECK (in (MELODEE_SCREEN_PUSH, 0)); // MORPH
     now += 2000;
     paint();
@@ -924,22 +954,30 @@ void testScreen (const std::string& folder)
            && in (MELODEE_SCREEN_WHEEL, -1));
     for (int i = 0; i < 4; ++i)
         CHECK (in (MELODEE_SCREEN_NUDGE, -1));
-    int asked = paints, rounds = 0;
     now += 40;
     paint();
-    while (paints > asked && rounds < 20) // the host: a paint for each request
-        asked = paints, now += 40, paint(), ++rounds;
-    CHECK (rounds >= 2 && rounds < 20);
-    const std::vector<uint32_t> caughtUp = pixels;
+    const auto catchingUp = outsideTitleMotion();
+    for (int i = 0; i < 4; ++i)
+        now += 60, paint();
+    const auto caughtUp = outsideTitleMotion();
+    CHECK (caughtUp != catchingUp);
     for (int i = 0; i < 6; ++i)
-        now += 40, paint();
-    CHECK (pixels == caughtUp);
+    {
+        now += 60;
+        CHECK (paint() && outsideTitleMotion() == caughtUp);
+    }
     CHECK (in (MELODEE_SCREEN_PUSH, 0)); // TIME again
 
-    // A preset loaded asks for a paint.
+    // A preset and a host knob flush both reach the sleeping page within the same title frame.
     const int before = paints;
     CHECK (a.loadPreset ("wide-space"));
-    CHECK (paints > before);
+    CHECK (paints > before && paint());
+    const auto presetBody = outsideTitleMotion();
+    Events move;
+    move.param (0, a.id ("Morph"), 0.99);
+    OutEvents notified;
+    a.params->flush (a.plugin, &move.in, &notified.out);
+    CHECK (paint() && outsideTitleMotion() != presetBody);
 }
 } // namespace
 

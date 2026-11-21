@@ -272,7 +272,7 @@ public:
         return true;
     }
 
-    // Something on the page moves by itself (a step lighting and fading): ask for paints.
+    // The body needs another full paint for its own animation.
     virtual bool animating (const Host&) const { return false; }
 
     int groupIndex() const { return current; }
@@ -283,7 +283,7 @@ protected:
     virtual int groupCount() const = 0;
     virtual const Group& groupAt (int index) const = 0;
     virtual void read (uint32_t id, Value& out) const = 0;
-    virtual const char* title() const = 0;
+    virtual void drawTitle (Raster&, const Host&) const = 0;
     virtual void drawStatus (Raster&, const Host&, int /* right */) {}                          // the header's right
     virtual void drawPanel (Raster&, const Host&, int /* x */, int /* y */, int /* w */, int /* h */) {}  // beside a list
     virtual void drawCustom (Raster&, const Host&, int /* x */, int /* y */, int /* w */, int /* h */) {} // a picture group
@@ -341,7 +341,7 @@ private:
         const Ink hi = accent (host);
         r.box (0, 0, width, height, c.bg);
         // Header: the name, large; the plug-in's status at the right.
-        r.text (6, headerY, title(), hi, 16, 2);
+        drawTitle (r, host);
         drawStatus (r, host, width - 6);
         // Tabs.
         int x = 4;
@@ -352,6 +352,9 @@ private:
             if (i == current)
             {
                 r.box (x, tabsY - 1, w, 13, hi);
+                r.box (x + w - 3, tabsY - 1, 3, 1, c.bg);
+                r.box (x + w - 2, tabsY, 2, 1, c.bg);
+                r.dot (x + w - 1, tabsY + 1, c.bg);
                 r.text (x + 3, tabsY, name, c.onAccent);
             }
             else
@@ -415,6 +418,18 @@ private:
         drawPanel (r, host, listW + 6, bodyY, width - listW - 8, bodyH);
     }
 
+    // A shallow chamfer catches the light at the end of each control panel.
+    void cardFace (Raster& r, int x, int y, int w, int h) const
+    {
+        r.box (x, y, w, h, colours.panel);
+        r.box (x + 17, y, w - 21, 1, colours.rule);
+        for (int row = 0; row < 4; ++row)
+        {
+            r.box (x + w - 4 + row, y + row, 4 - row, 1, colours.bg);
+            r.dot (x + w - 5 + row, y + row, colours.dim);
+        }
+    }
+
     void drawCards (Raster& r, const Host& host)
     {
         const Palette& c = colours;
@@ -425,7 +440,7 @@ private:
         for (int k = 0; k < 3; ++k)
         {
             const int x = 4 + k * (w + 4), y = cardsY;
-            r.box (x, y, w, cardsH - 2, c.panel);
+            cardFace (r, x, y, w, cardsH - 2);
             char tag[3] = { 'K', (char) ('1' + k), 0 };
             r.box (x, y, 17, 13, ids[k] != noParam ? hi : c.rule);
             r.text (x + 2, y + 1, tag, c.onAccent);
@@ -467,7 +482,7 @@ private:
         for (int k = 0; k < 3; ++k)
         {
             const int x = 4 + k * (w + 4), y = stripY;
-            r.box (x, y, w, stripH, c.panel);
+            cardFace (r, x, y, w, stripH);
             char tag[3] = { 'K', (char) ('1' + k), 0 };
             r.box (x, y, 17, 13, ids[k] != noParam ? hi : c.rule);
             r.text (x + 2, y + 1, tag, c.onAccent);
@@ -496,7 +511,7 @@ private:
         for (int k = 0; k < 3; ++k)
         {
             const int x = 4 + k * (w + 4);
-            r.box (x, cardsY, w, cardsH - 2, colours.panel);
+            cardFace (r, x, cardsY, w, cardsH - 2);
             r.text (x + 5, cardsY + 10, lines[2 * k], accent (host), 14);
             r.text (x + 5, cardsY + 30, lines[2 * k + 1], colours.text, 14);
         }

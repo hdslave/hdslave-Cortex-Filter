@@ -22,6 +22,7 @@
 #include "morph.h"
 #include "params.h"
 #include "ui/page.h"
+#include "ui/wordmark.h"
 
 #include <atomic>
 #include <cctype>
@@ -101,7 +102,7 @@ public:
     Screen (const std::atomic<float>* values, Feed& feed, Store& store, Commands& commands)
         : values (values), feed (feed), store (store), commands (commands)
     {
-        colours = { 0xff05070e, 0xff0c1120, 0xff141c33, 0xff243050, 0xffe6eeff, 0xff8d9bc2, 0xff384464, 0xff3ee0ff, 0xff03121a };
+        colours = { wordmark::background, 0xff0c1120, 0xff141c33, 0xff243050, 0xffe6eeff, 0xff8d9bc2, 0xff384464, 0xff3ee0ff, 0xff03121a };
         for (int i = 0; i < cols; ++i)
             columnHz[i] = 20.0f * std::pow (1000.0f, (float) i / (float) (cols - 1));
         static_assert (sizeof (filterRows) / sizeof (filterRows[0]) == filterCount, "the FILTER rows");
@@ -112,11 +113,32 @@ public:
         groupList[6] = { "ENV", envelope, 6 }, groupList[7] = { "OUT", out, 4 };
     }
 
-    // The picture moves by itself: sound ran through the filter lately, or MORPH view's landscape is still catching
+    // The graphs move by themselves: sound ran through the filter lately, or MORPH view's landscape is still catching
     // up with a change (it follows a few slices a frame, even while the sound sleeps).
     bool animating (const hdui::Host&) const override { return live || (groupIndex() == cubeGroup && viewMorph && morphStale() > 0); }
     // A moving picture's next frame is due (about 30 a second).
-    bool due (uint64_t nowMs) const { return nowMs - lastFrameMs >= frameMs; }
+    bool due (uint64_t nowMs) const { return nowMs - lastHost.nowMs >= frameMs; }
+
+    bool hostChanged (const hdui::Host& h) const
+    {
+        return lastTitleFrame < 0 || h.accent != lastHost.accent || h.shift != lastHost.shift || h.playing != lastHost.playing
+               || ! std::equal (h.pot, h.pot + 3, lastHost.pot) || ! std::equal (h.engaged, h.engaged + 3, lastHost.engaged);
+    }
+
+    bool bodyAtRest (const hdui::Host& h) const
+    {
+        return feed.blocks.load (std::memory_order_acquire) == seenBlocks && ! animating (h);
+    }
+
+    bool paintTitleOnly (const hdui::Host& h, uint32_t* pixels, int stride)
+    {
+        const int frame = wordmark::frameAt (h.nowMs);
+        if (frame == lastTitleFrame)
+            return false;
+        wordmark::drawMotion (pixels, stride, frame);
+        lastTitleFrame = frame;
+        return true;
+    }
 
     // The audio thread's news and the animation's step, before each paint.
     void update (uint64_t nowMs)
@@ -190,7 +212,11 @@ public:
         }
         relabel();
     }
-    void drew (uint64_t nowMs) { lastFrameMs = nowMs; }
+    void drew (const hdui::Host& h)
+    {
+        lastHost = h;
+        lastTitleFrame = wordmark::frameAt (h.nowMs);
+    }
 
     bool morphView() const { return viewMorph; }
     // MORPH view's slices not yet worked out for the cube and point drawn last (for the tests).
@@ -207,7 +233,12 @@ public:
 protected:
     int groupCount() const override { return (int) (sizeof (groupList) / sizeof (groupList[0])); }
     const hdui::Group& groupAt (int i) const override { return groupList[i]; }
-    const char* title() const override { return "CORTEX FILTER"; }
+    void drawTitle (hdui::Raster& r, const hdui::Host& h) const override
+    {
+        for (int y = 0; y < wordmark::height; ++y)
+            std::copy_n (wordmark::fixed.data() + y * wordmark::width, wordmark::width, r.px + y * r.stride);
+        wordmark::drawMotion (r.px, r.stride, wordmark::frameAt (h.nowMs));
+    }
     bool tallCustom() const override { return true; }
     bool customEditing() const override { return groupIndex() == seqGroup && editingStep; }
 
@@ -362,6 +393,8 @@ protected:
         drawCube (r, h, Camera (yaw(), pitch(), 4.6f, 128.0f, (float) (x + w / 2), (float) (y + 36)), false);
         const int top = y + height - 26;
         r.box (x, top - 2, w, 1, colours.rule);
+        const int zeroY = top + 25 - (int) std::lround (-dbLow / (dbHigh - dbLow) * 25.0f);
+        r.line (x, zeroY, x + w - 1, zeroY, colours.dim, 1);
         drawCurve (r, sliceDb[sliceHead], x, top, w, 26, accent (h));
     }
 
@@ -369,6 +402,7 @@ protected:
     {
         if (groupIndex() == seqGroup)
             return drawSequence (r, h, x, y, w, height);
+        drawScopeRim (r, x + 78, y + 85);
         drawCube (r, h, Camera (yaw(), pitch(), 4.6f, 184.0f, (float) (x + 80), (float) (y + height / 2 + 2)), true);
         drawWaterfall (r, h, x + 158, y + height - 12);
         drawReadouts (r, h, x + 4, y + 1);
@@ -398,7 +432,9 @@ private:
     bool splitNow = false, live = false, heard = false, viewMorph = false, drives = false;
     float controlNow[3] {}, meter[6] {};
     uint32_t seenBlocks = 0, seenTriggers = 0;
-    uint64_t lastBlockMs = 0, lastUpdateMs = 0, lastFrameMs = 0, lastSliceMs = 0, swayMs = 0, flashUntilMs = 0;
+    hdui::Host lastHost {};
+    int lastTitleFrame = -1;
+    uint64_t lastBlockMs = 0, lastUpdateMs = 0, lastSliceMs = 0, swayMs = 0, flashUntilMs = 0;
     float rate = 48000.0f;
     int slotNow = 1, shownCube = -2;
     float shownEmphasis = 0.0f, shownRate = 0.0f, shownLevel = 0.0f;
@@ -536,6 +572,20 @@ private:
     }
 
     static float depthShade (float depth) { return std::clamp ((depth + 1.6f) / 3.2f, 0.0f, 1.0f); }
+
+    // Opposite quadrants of the fixed scope bezel. The open quadrants give the axis labels room.
+    static void drawScopeRim (hdui::Raster& r, int cx, int cy)
+    {
+        constexpr int arc[][2] = { { -73, -5 }, { -69, -19 }, { -59, -33 }, { -44, -44 }, { -27, -51 } };
+        for (int side : { -1, 1 })
+        {
+            for (int i = 1; i < 5; ++i)
+                r.line (cx + side * arc[i - 1][0], cy + side * arc[i - 1][1],
+                        cx + side * arc[i][0], cy + side * arc[i][1], 0xff26223f);
+            r.line (cx - side * 62, cy - side * 35, cx - side * 58, cy - side * 32, 0xff514667);
+            r.line (cx - side * 45, cy - side * 47, cx - side * 43, cy - side * 43, 0xff6f7153);
+        }
+    }
 
     void drawCube (hdui::Raster& r, const hdui::Host& h, const Camera& cam, bool big)
     {
@@ -726,6 +776,15 @@ private:
     {
         const hdui::Ink hi = accent (h);
         const hdui::Ink bg = colours.bg;
+        // Three frequency rails on the floor, in the same projection as the slices.
+        // Draw first so every response occludes them, including a flat or nearly silent filter.
+        static constexpr int ticks[] = { 26, 63, 100 }; // 100 Hz, 1 kHz, 10 kHz on 112 log-spaced columns
+        const int rearX = x0 + (int) std::lround ((slices - 1) * sliceDx);
+        const int rearY = base + (int) std::lround ((slices - 1) * sliceDy);
+        r.box (rearX, rearY, cols, 1, grid);
+        for (int tick : ticks)
+            r.line (x0 + tick, base, rearX + tick, rearY, 0xff202039);
+        r.line (x0 + cols - 1, base, rearX + cols - 1, rearY, 0xff36314f);
         int horizon[hdui::width];
         std::fill (horizon, horizon + hdui::width, hdui::height);
         if (viewMorph)
@@ -764,8 +823,6 @@ private:
                 const hdui::Ink ink = sliceInk (0.25f + 0.75f * t, hdui::mix (hi, colours.muted, 128));
                 drawSlice (r, horizon, morphDb[s], x0, base, t, ink, hdui::mix (bg, ink, 22));
             }
-            r.text (x0 + 2, base - 136, "MORPH", colours.muted);
-            r.text (x0 + 2 + 36, base - 136, "->", colours.dim);
         }
         else
         {
@@ -778,19 +835,28 @@ private:
             }
             if (splitNow)
                 drawSliceLine (r, rightDb, x0, base, magenta);
-            r.text (x0 + 2, base - 136, "TIME", colours.muted);
         }
+        // The three offset traces echo the waterfall next to its view name.
+        const int keyY = base - 136;
+        for (int s = 0; s < 3; ++s)
+        {
+            const int x = x0 + 2 + 2 * s, y = keyY + 8 - 3 * s;
+            const hdui::Ink ink = s == 0 ? (viewMorph ? white : hi) : (s == 1 ? magenta : edgeFar);
+            r.line (x, y, x + 2, y - 2, ink);
+            r.box (x + 2, y - 2, 5, 1, ink);
+        }
+        r.text (x0 + 17, keyY, viewMorph ? "MORPH ->" : "TIME", colours.muted);
         // The front's floor, its 0 dB and its frequencies.
         r.box (x0, base + 1, cols, 1, colours.rule);
         const int zero = base - (int) std::lround ((0.0f - dbLow) / (dbHigh - dbLow) * sliceHeight);
         for (int i = 0; i < cols; i += 4)
             r.dot (x0 + i, zero, hdui::mix (bg, colours.text, 90));
-        for (float hz : { 100.0f, 1000.0f, 10000.0f })
+        static constexpr const char* labels[] = { "100", "1K", "10K" };
+        for (int i = 0; i < 3; ++i)
         {
-            const int at = x0 + (int) std::lround (std::log (hz / 20.0f) / std::log (1000.0f) * (cols - 1));
+            const int at = x0 + ticks[i];
             r.box (at, base + 1, 1, 3, colours.muted);
-            const char* label = hz < 500.0f ? "100" : (hz < 5000.0f ? "1K" : "10K");
-            r.text (at - hdui::textWidth (label) / 2, base + 3, label, colours.dim);
+            r.text (at - hdui::textWidth (labels[i]) / 2, base + 3, labels[i], colours.muted);
         }
     }
 

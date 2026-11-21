@@ -235,7 +235,9 @@ parameter list. In stock Melodee or another host, the parameters are listed as u
 
 The header names the filter heard and the sequence's place (its step, or −P− and −H−, and a Fade scale other than x1),
 lit yellow for a moment by each trigger. While no sound runs Melodee lets the effect sleep:
-the page stops moving and shows where the knobs put the point, as far as the plug-in has been told them. Changes made
+the cube and meters settle, and the page shows where the knobs put the point. The CORTEX lettering ripples one pixel
+to either side on a 3.84-second loop. The O holds a clockwise spiral planet with a glint traveling around its ring. Both
+animations share a screen-thread tick while the effect is idle. Changes made
 on the page show at once; a K1-K3 turn shows once Melodee passes it to the plug-in. MORPH view's landscape still
 catches up with a change while the sound sleeps.
 
@@ -310,8 +312,8 @@ tools/artifacts.sh  # what the 8-frame control steps add to a tone under a movin
   output to the bit in blocks of 1, 3, 8, 64, 128, 333, 1024 and 4096 frames, the sequencer running (clocks, the
   envelope, a gate, edit filter changes); Mix 0 giving the input back to the bit;
   a mono input, no input, the same buffers in and out; random settings changed every 64 frames on loud noise staying
-  finite and under 2, then ringing down to nothing; and the page (it draws, follows the sound and the knobs, animates
-  only while sound runs, drawing a new frame every 40 ms of it, its controls set the values the host hears, the wheel
+  finite and under 2, then ringing down to nothing; and the page (its title loops while the sound sleeps, the graphs
+  follow the sound and the knobs, drawing a new frame every 40 ms of playback, its controls set the values the host hears, the wheel
   loading filters, an edit kept in its filter, Copy and Restore, a step edited on SEQ, Inc pressed on TRIG asking
   for the sound to run, MORPH view catching up by itself while the sound sleeps). It writes the presets through a test loop to
   `build/demo-*.wav` (`demo-dry.wav` is the loop itself, `demo-every-cube.wav` sweeps each cube in turn) and the page

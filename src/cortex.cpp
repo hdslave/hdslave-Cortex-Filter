@@ -56,6 +56,13 @@ struct Plugin
 
 Plugin& of (const clap_plugin* p) { return *static_cast<Plugin*> (p->plugin_data); }
 
+void invalidatePage (Plugin& p)
+{
+    p.paintAsked.store (true, std::memory_order_release);
+    if (p.hostScreen != nullptr)
+        p.hostScreen->request_paint (p.host);
+}
+
 // The values the screen's page set, told to the host (so its own copy, its automation and its knobs follow).
 void tellHost (Plugin& p, const clap_output_events* out, uint32_t time)
 {
@@ -209,8 +216,8 @@ void paramsFlush (const clap_plugin* plugin, const clap_input_events* in, const 
         }
     }
     tellHost (p, out, 0);
-    if (changed && p.hostScreen != nullptr) // the page shows it, even while nothing else moves
-        p.hostScreen->request_paint (p.host);
+    if (changed)
+        invalidatePage (p);
 }
 
 const clap_plugin_params paramsExtension { paramsCount, paramsInfo, paramsValue, paramsToText, paramsFromText, paramsFlush };
@@ -263,8 +270,7 @@ void setAll (Plugin& p, const float* values)
     if (! p.active) // not processing: the engine takes them now; otherwise at the next block
         for (uint32_t i = 0; i < paramCount; ++i)
             p.applied[i] = p.values[i].load (std::memory_order_relaxed), p.engine.set (paramTable[i].id, p.applied[i]);
-    if (p.hostScreen != nullptr)
-        p.hostScreen->request_paint (p.host);
+    invalidatePage (p);
 }
 
 bool stateSave (const clap_plugin* plugin, const clap_ostream* stream)
@@ -484,6 +490,7 @@ bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t 
     p.engine.prepare (rate, maxFrames);
     p.feed.rate.store ((float) rate, std::memory_order_relaxed);
     p.active = true;
+    invalidatePage (p);
     return true;
 }
 
@@ -651,21 +658,21 @@ bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
         return false;
     auto& p = of (plugin);
     const hdui::Host h = hostOf (c);
-    // While the picture moves by itself a frame comes about every 33 ms; one an input asked for comes at once. A call
-    // that comes sooner does nothing (not even the page's step: its history counts frames drawn).
+    // The host services this request while the page is visible, including when the audio thread sleeps.
+    if (p.hostScreen != nullptr)
+        p.hostScreen->request_paint (p.host);
     const bool asked = p.paintAsked.exchange (false, std::memory_order_acq_rel);
-    if (! c->whole && ! asked && p.screen.animating (h) && ! p.screen.due (h.nowMs))
+    if (! c->whole && ! asked && ! p.screen.hostChanged (h))
     {
-        if (p.hostScreen != nullptr)
-            p.hostScreen->request_paint (p.host);
-        return false;
+        if (p.screen.bodyAtRest (h))
+            return p.screen.paintTitleOnly (h, c->pixels, (int) c->stride);
+        if (! p.screen.due (h.nowMs))
+            return false;
     }
     p.meterUntil.store (p.feed.blocks.load (std::memory_order_relaxed) + 400, std::memory_order_relaxed);
     p.screen.update (h.nowMs);
     const bool drew = p.screen.paint (h, c->pixels, (int) c->stride, c->whole);
-    p.screen.drew (h.nowMs);
-    if (p.screen.animating (h) && p.hostScreen != nullptr)
-        p.hostScreen->request_paint (p.host); // the next frame, even while the sound sleeps
+    p.screen.drew (h);
     return drew;
 }
 
@@ -704,11 +711,7 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* e)
     if (p.commands.count() != commandsBefore && p.host->request_process != nullptr)
         p.host->request_process (p.host);
     if (used)
-    {
-        p.paintAsked.store (true, std::memory_order_release);
-        if (p.hostScreen != nullptr)
-            p.hostScreen->request_paint (p.host);
-    }
+        invalidatePage (p);
     return used;
 }
 
