@@ -102,7 +102,7 @@ int main()
         {
             float v[paramCount];
             defaults (v);
-            v[paramIndex (ParamId::cube)] = (float) c;
+            v[paramIndex (ParamId::filter)] = (float) (c + 1);
             v[paramIndex (ParamId::glide)] = 0.0f;
             v[paramIndex (ParamId::morph)] = k < 9 ? (k % 3) * 0.5f : 0.5f;
             v[paramIndex (ParamId::transform)] = k < 9 ? (k / 3) * 0.5f : 0.5f;
@@ -120,12 +120,29 @@ int main()
         {
             float v[paramCount];
             defaults (v);
-            v[paramIndex (ParamId::cube)] = (float) c, v[paramIndex (ParamId::morph)] = 0.5f, v[paramIndex (ParamId::freq)] = 0.5f;
+            v[paramIndex (ParamId::filter)] = (float) (c + 1), v[paramIndex (ParamId::morph)] = 0.5f, v[paramIndex (ParamId::freq)] = 0.5f;
             v[paramIndex (ParamId::transform)] = 0.5f, v[paramIndex (ParamId::emphasis)] = e == 0 ? -1.0f : 1.0f;
             emph[e] = rmsDb (run (music, v), 4800) - dryMusic;
         }
         std::printf ("  %2d %-15s loop %+6.1f %+6.1f %+6.1f   pink %+6.1f %+6.1f %+6.1f   emph %+6.1f %+6.1f\n", c, cubeNames[c], lo[0], mid[0], hi[0],
                      lo[1], mid[1], hi[1], emph[0], emph[1]);
+    }
+    std::printf ("factory filters F17-F32 against their cube as it is (loop, every knob at the middle; Transform 70 %% too for those it drives):\n");
+    for (int slot = 17; slot <= factoryFilterCount; ++slot)
+    {
+        const Store bank;
+        double db[3];
+        for (int k = 0; k < 3; ++k)
+        {
+            float v[paramCount];
+            defaults (v);
+            const int cube = (int) bank.field (slot, fieldCube);
+            v[paramIndex (ParamId::filter)] = k == 0 ? (float) (cube > 0 ? cube : 32) : (float) slot;
+            v[paramIndex (ParamId::glide)] = 0.0f, v[paramIndex (ParamId::morph)] = 0.5f, v[paramIndex (ParamId::freq)] = 0.5f;
+            v[paramIndex (ParamId::transform)] = k == 2 ? 0.7f : 0.5f;
+            db[k] = rmsDb (run (music, v), 4800) - dryMusic;
+        }
+        std::printf ("  F%02d %-13s %+6.1f dB (cube %+6.1f)   Transform 70 %% %+6.1f\n", slot, Store().name (slot), db[1], db[0], db[2]);
     }
     std::printf ("drive at Init, Mix 100 %% (loop):");
     for (float d : { 0.0f, 6.0f, 12.0f, 18.0f, 24.0f })

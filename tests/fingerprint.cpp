@@ -4,7 +4,9 @@
 // are. A change meant to change the sound updates the file with `make fingerprint-update`.
 //   fingerprint PLUGIN.clap [EXPECTED.txt]
 // The scenarios: each factory preset, each cube at three points, random settings changed as it plays, other rates,
-// other block sizes (which must hash the same as 128), the song stopped and jumping under a synced LFO. Hashes hold
+// other block sizes (which must hash the same as 128), the song stopped and jumping under a synced LFO; from 0.2.0 the
+// factory's other filters, the sequencer (its clocks, gates and envelope, under a stopping and jumping song) and the
+// edit filter's settings changed as it plays. Hashes hold
 // for this toolchain and these flags (Melodee's build image, -O3 -mcpu=cortex-a55 -ffp-contract=fast).
 #include "signal.h"
 
@@ -82,6 +84,9 @@ uint64_t render (const Scenario& s)
     for (auto& [name, v] : s.values)
         changes.push_back ({ 0, name, v });
     changes.insert (changes.end(), s.changes.begin(), s.changes.end());
+    for (auto& c : changes) // 0.1.0's Cube is the factory's filter for that cube now (F01..F16)
+        if (c.name == "Cube")
+            c.name = "Filter", c.value = std::round (c.value) + 1.0;
     const size_t frames = (size_t) (s.seconds * s.rate);
     const Stereo in = s.signal == 0 ? loop (s.rate, s.seconds) : whiteNoise (frames, 0.7f, 5);
     std::vector<float> l (s.block), r (s.block), allL, allR;
@@ -222,6 +227,59 @@ std::vector<Scenario> scenarios()
             if (t < 2.5) return { true, 16.0 + (t - 1.5) * 2.0 };
             return { true, (t - 2.5) * 2.0 };
         };
+        list.push_back (s);
+    }
+    // 0.2.0: the sequencer's presets; the factory's filters F17-F32 at three points; a sequence under the stopping
+    // and jumping song; Up And Down moved by gates and the envelope; the edit filter's settings changed as it plays.
+    for (const char* preset : { "acid-sequence", "vowel-walk", "hit-steps", "bar-gate", "wander" })
+    {
+        Scenario s;
+        s.name = std::string ("preset-") + preset;
+        s.preset = preset;
+        s.seconds = 6.0;
+        list.push_back (s);
+    }
+    for (int f = 17; f <= 32; ++f)
+        for (int k = 0; k < 3; ++k)
+        {
+            Scenario s;
+            s.name = "filter-" + std::to_string (f) + "-" + std::to_string (k);
+            s.values = { { "Filter", f }, { "Morph", points[k][0] }, { "Freq", points[k][1] }, { "Transform", points[k][2] } };
+            s.seconds = 1.5;
+            s.signal = k == 1 ? 1 : 0;
+            list.push_back (s);
+        }
+    {
+        Scenario s;
+        s.name = "sequence-stop-and-jumps";
+        s.preset = "acid-sequence";
+        s.transport = [] (uint64_t, double t) -> std::pair<bool, double> {
+            if (t < 1.0) return { true, t * 2.0 };
+            if (t < 1.5) return { false, 2.0 };
+            if (t < 2.5) return { true, 16.0 + (t - 1.5) * 2.0 };
+            return { true, (t - 2.5) * 2.0 };
+        };
+        list.push_back (s);
+    }
+    {
+        Scenario s;
+        s.name = "sequence-gates";
+        s.values = { { "Sequence", 8 }, { "Inc Clock", 0 }, { "Env Trigger", 3 }, { "Trig Level", -6 }, { "Morph", 0.4 } };
+        for (int k = 0; k < 24; ++k)
+        {
+            const char* gate = k % 5 == 3 ? "Dec" : "Inc";
+            s.changes.push_back ({ (uint64_t) (4000 + k * 7000), gate, 1.0 });
+            s.changes.push_back ({ (uint64_t) (4000 + k * 7000 + 900), gate, 0.0 });
+        }
+        list.push_back (s);
+    }
+    {
+        Scenario s;
+        s.name = "edit-filter-live";
+        s.values = { { "Filter", 10 }, { "Morph", 0.3 }, { "LFO > Freq", 0.5 }, { "LFO Rate", 0.6 } };
+        s.changes = { { 20000, "Freq Offset", 35 }, { 40000, "Left Dist", 20 }, { 60000, "Freq Gain", -15 }, { 80000, "Xform > Dist", 1 },
+                      { 90000, "Transform", 0.9 }, { 100000, "Right Gain", -8 }, { 110000, "Exit Fade", 0.4 }, { 110000, "Enter Fade", 0.5 },
+                      { 120000, "Filter", 13 }, { 150000, "Cube", 0 }, { 170000, "Filter", 10 } };
         list.push_back (s);
     }
     return list;

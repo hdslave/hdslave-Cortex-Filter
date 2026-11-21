@@ -8,6 +8,7 @@
 #include "signal.h"
 #include "wav.h"
 #include "../src/melodee_screen.h"
+#include "../src/filters.h"
 #include "../src/morph.h"
 #include "../src/presets.h"
 
@@ -34,7 +35,7 @@ int failures = 0, checks = 0;
 const clap_plugin_entry* entry = nullptr;
 const clap_plugin_factory* factory = nullptr;
 
-int rescans = 0, flushes = 0, paints = 0, presetsLoaded = 0, presetErrors = 0;
+int rescans = 0, flushes = 0, paints = 0, presetsLoaded = 0, presetErrors = 0, processes = 0;
 const void* hostExtension (const clap_host*, const char* id)
 {
     static const clap_host_log log { [] (const clap_host*, clap_log_severity s, const char* m) { std::printf ("  [plug-in log %d] %s\n", (int) s, m); } };
@@ -54,7 +55,7 @@ const void* hostExtension (const clap_host*, const char* id)
 
 clap_host host {
     CLAP_VERSION, nullptr, "Cortex Filter test host", "tests", "", "1",
-    hostExtension, [] (const clap_host*) {}, [] (const clap_host*) {}, [] (const clap_host*) {},
+    hostExtension, [] (const clap_host*) {}, [] (const clap_host*) { ++processes; }, [] (const clap_host*) {},
 };
 
 // A parameter change at a frame of the render.
@@ -263,7 +264,9 @@ void testParameters()
         CHECK (seen[info.id]++ == 0 && info.id < cortex::ParamId::count);
         CHECK (info.min_value < info.max_value && info.default_value >= info.min_value && info.default_value <= info.max_value);
         double v = -1.0;
-        CHECK (a.params->get_value (a.plugin, info.id, &v) && v == info.default_value);
+        static const cortex::Store factory;
+        const double expect = cortex::isEditField (info.id) ? factory.field (1, (int) (info.id - cortex::ParamId::editCube)) : info.default_value;
+        CHECK (a.params->get_value (a.plugin, info.id, &v) && v == expect); // the edit filter's fields show F01
         // Text there and back for a spread of values: the same text again, and a value within one text's step.
         for (int k = 0; k <= 8; ++k)
         {
@@ -283,7 +286,15 @@ void testParameters()
     CHECK (! a.params->get_info (a.plugin, cortex::paramCount, nullptr));
     double v = 0.0;
     CHECK (! a.params->get_value (a.plugin, 999, &v));
-    CHECK (a.params->text_to_value (a.plugin, a.id ("Cube"), "Bell Tower", &v) && v == 7.0);
+    CHECK (a.params->text_to_value (a.plugin, a.id ("Cube"), "Bell Tower", &v) && v == 8.0); // the edit filter's: Null first
+    CHECK (a.params->text_to_value (a.plugin, a.id ("Filter"), "F17 Deep Acid", &v) && v == 17.0);
+    CHECK (a.params->text_to_value (a.plugin, a.id ("Filter"), "f5", &v) && v == 5.0);
+    CHECK (! a.params->text_to_value (a.plugin, a.id ("Filter"), "five", &v));
+    char text[64];
+    CHECK (a.params->value_to_text (a.plugin, a.id ("Filter"), 8.0, text, sizeof (text)) && std::string (text) == "F08 Bell Tower");
+    CHECK (a.params->value_to_text (a.plugin, a.id ("Filter"), 40.0, text, sizeof (text)) && std::string (text) == "F40 --empty--");
+    CHECK (a.params->text_to_value (a.plugin, a.id ("Freq Gain"), "-1.5x", &v) && v == -15.0);
+    CHECK (a.params->text_to_value (a.plugin, a.id ("Exit Fade"), "250 ms", &v) && std::fabs (cortex::fadeSeconds ((float) v) - 0.25f) < 1e-5f);
     CHECK (a.params->text_to_value (a.plugin, a.id ("LFO Sync"), "1/8T", &v) && v == 10.0);
     CHECK (a.params->text_to_value (a.plugin, a.id ("LFO Sync"), " 1/8 ", &v) && v == 9.0);
     CHECK (a.params->text_to_value (a.plugin, a.id ("LFO Sync"), "4 bars", &v) && v == 2.0);
@@ -293,8 +304,8 @@ void testParameters()
     CHECK (a.params->text_to_value (a.plugin, a.id ("LFO Rate"), "0", &v) && v == 0.0);
     CHECK (! a.params->text_to_value (a.plugin, a.id ("Mix"), "lots", &v));
     // A value out of range from the host is held to the range.
-    a.setup ({ { "Mix", 7.0 }, { "Cube", -3.0 } }, 0.01);
-    CHECK (a.value ("Mix") == 1.0 && a.value ("Cube") == 0.0);
+    a.setup ({ { "Mix", 7.0 }, { "Filter", -3.0 } }, 0.01);
+    CHECK (a.value ("Mix") == 1.0 && a.value ("Filter") == 1.0);
 }
 
 struct Memory
@@ -320,12 +331,12 @@ void testState()
     Memory m;
     {
         Instance a;
-        a.setup ({ { "Cube", 9 }, { "Morph", 0.33 }, { "LFO Sync", 5 }, { "Env > Freq", -0.4 }, { "Output", -6.5 } }, 0.01);
+        a.setup ({ { "Filter", 10 }, { "Morph", 0.33 }, { "LFO Sync", 5 }, { "Env > Freq", -0.4 }, { "Output", -6.5 } }, 0.01);
         CHECK (a.state->save (a.plugin, &m.out));
     }
     Instance b;
     CHECK (b.state->load (b.plugin, &m.in));
-    CHECK (b.value ("Cube") == 9 && std::fabs (b.value ("Morph") - 0.33) < 1e-6 && b.value ("LFO Sync") == 5
+    CHECK (b.value ("Filter") == 10 && std::fabs (b.value ("Morph") - 0.33) < 1e-6 && b.value ("LFO Sync") == 5
            && std::fabs (b.value ("Env > Freq") + 0.4) < 1e-6 && std::fabs (b.value ("Output") + 6.5) < 1e-6);
     // Another plug-in's state, or a cut-off one, is refused; one with fewer values (an older version) keeps the
     // defaults for the rest; an unknown id is passed over.
@@ -342,14 +353,67 @@ void testState()
     older.bytes.insert (older.bytes.end(), (const uint8_t*) header, (const uint8_t*) header + sizeof (header));
     older.bytes.insert (older.bytes.end(), (const uint8_t*) pairs, (const uint8_t*) pairs + sizeof (pairs));
     CHECK (b.state->load (b.plugin, &older.in));
-    CHECK (b.value ("Spread") == 0.5 && b.value ("Cube") == 0 && b.value ("Morph") == 0.0);
+    CHECK (b.value ("Spread") == 0.5 && b.value ("Filter") == 1 && b.value ("Morph") == 0.0);
+
+    // 0.1.0's state: its Cube (id 0) is the factory's filter for that cube.
+    {
+        Memory v1;
+        const uint32_t head[2] = { 1, 2 };
+        const struct { uint32_t id; float value; } old[2] = { { 0u, 9.0f }, { cortex::ParamId::morph, 0.25f } };
+        v1.bytes.insert (v1.bytes.end(), { 'C', 'R', 'T', 'X' });
+        v1.bytes.insert (v1.bytes.end(), (const uint8_t*) head, (const uint8_t*) head + sizeof (head));
+        v1.bytes.insert (v1.bytes.end(), (const uint8_t*) old, (const uint8_t*) old + sizeof (old));
+        Instance c;
+        CHECK (c.state->load (c.plugin, &v1.in));
+        CHECK (c.value ("Filter") == 10 && c.value ("Morph") == 0.25 && c.value ("Cube") == 10); // F10 Acid Twins
+    }
+    // The bank and the sequences go with the state: an edited filter, a copied one, a sequence programmed; a state
+    // cut off inside them is refused and changes nothing.
+    {
+        Memory bank;
+        {
+            Instance a;
+            a.setup ({ { "Filter", 40 }, { "Cube", 13 }, { "Freq Offset", 25 }, { "Right Dist", 12 }, { "Filter", 9 }, { "Sequence", 12 } }, 0.01);
+            const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+            auto in = [&] (uint32_t kind, int value) { melodee_screen_input_t e { kind, value, false }; return screen->input (a.plugin, &e); };
+            // SEQ (two groups on), Sequence 12 empty: Add Step twice (the filter Filter picks, F09), then the first
+            // step made a Halt: its choices are the 33 filters in use (F01-F32, F40), then Pause, Halt.
+            CHECK (in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_NUDGE, 1));
+            CHECK (in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_PUSH, 0));
+            CHECK (in (MELODEE_SCREEN_WHEEL, -5) && in (MELODEE_SCREEN_PUSH, 0)); // editing step 1, on F09 (choice 8)
+            CHECK (in (MELODEE_SCREEN_WHEEL, 33 + 1 - 8) && in (MELODEE_SCREEN_PUSH, 0));
+            CHECK (a.state->save (a.plugin, &bank.out));
+        }
+        // Sequence 12 as saved: two steps, Halt then F09.
+        const auto seqs = std::search (bank.bytes.begin(), bank.bytes.end(), std::begin ("SEQS"), std::begin ("SEQS") + 4);
+        CHECK (seqs != bank.bytes.end());
+        if (seqs != bank.bytes.end())
+        {
+            const size_t at = (size_t) (seqs - bank.bytes.begin()) + 12 + 11 * (1 + cortex::maxSteps);
+            CHECK (bank.bytes[at] == 2 && bank.bytes[at + 1] == cortex::stepHalt && bank.bytes[at + 2] == 9);
+        }
+        Instance b;
+        CHECK (b.state->load (b.plugin, &bank.in));
+        Memory again;
+        CHECK (b.state->save (b.plugin, &again.out) && again.bytes == bank.bytes); // all of it, back as it was
+        b.setup ({ { "Filter", 40 } }, 0.01);
+        CHECK (b.value ("Cube") == 13 && b.value ("Freq Offset") == 25 && b.value ("Right Dist") == 12);
+        char text[64];
+        CHECK (b.params->value_to_text (b.plugin, b.id ("Filter"), 40.0, text, sizeof (text)) && std::string (text) == "F40 Metal Plate");
+        Memory cut;
+        cut.bytes.assign (bank.bytes.begin(), bank.bytes.end() - 40);
+        Instance c;
+        c.setup ({ { "Filter", 40 } }, 0.01);
+        CHECK (! c.state->load (c.plugin, &cut.in));
+        CHECK (c.value ("Cube") == 0 && c.params->value_to_text (c.plugin, c.id ("Filter"), 40.0, text, sizeof (text)) && std::string (text) == "F40 --empty--");
+    }
 
     // A state loaded into a running plug-in (as Melodee opens a project: activate, then load) sounds at once as it was
     // saved, the same to the bit as one loaded before activation, not gliding in from the defaults.
     Memory saved;
     {
         Instance a;
-        a.setup ({ { "Glide", 1.0 }, { "Morph", 1.0 }, { "Freq", 0.0 }, { "Transform", 1.0 }, { "Cube", 7 }, { "Output", -24.0 }, { "Mix", 0.5 },
+        a.setup ({ { "Glide", 1.0 }, { "Morph", 1.0 }, { "Freq", 0.0 }, { "Transform", 1.0 }, { "Filter", 8 }, { "Output", -24.0 }, { "Mix", 0.5 },
                    { "Spread", 0.5 }, { "LFO > Freq", 0.3 } }, 0.01);
         CHECK (a.state->save (a.plugin, &saved.out));
     }
@@ -434,6 +498,10 @@ void testPresets()
         CHECK (a.loadPreset (listed[i].key.c_str()) && presetsLoaded == before + 1);
         float expect[cortex::paramCount];
         cortex::presetValuesOf (cortex::presetTable[i], expect);
+        static const cortex::Store factory;
+        const int slot = (int) expect[cortex::paramIndex (cortex::ParamId::filter)];
+        for (int f = 0; f < cortex::fieldCount; ++f) // the edit filter's fields: the filter the preset picks
+            expect[cortex::paramIndex (cortex::fieldParam (f))] = factory.field (slot, f);
         bool same = true;
         for (uint32_t p = 0; p < cortex::paramCount; ++p)
         {
@@ -463,7 +531,7 @@ void testResponse()
     for (const Case& c : cases)
     {
         Instance a (c.rate);
-        const auto h = impulseResponse (a, { { "Cube", c.cube }, { "Morph", c.p.x }, { "Freq", c.p.y }, { "Transform", c.p.z }, { "Emphasis", c.emphasis },
+        const auto h = impulseResponse (a, { { "Filter", c.cube + 1 }, { "Morph", c.p.x }, { "Freq", c.p.y }, { "Transform", c.p.z }, { "Emphasis", c.emphasis },
                                              { "Glide", 0.0 } },
                                         (size_t) (c.rate * 5.5));
         cortex::Design d;
@@ -499,14 +567,14 @@ void testKnownFilters()
     for (int cube : { 0, 1 })
     {
         Instance a;
-        const auto h = impulseResponse (a, { { "Cube", cube }, { "Morph", 0 }, { "Freq", y1k }, { "Transform", 0 }, { "Glide", 0.0 } }, 48000);
+        const auto h = impulseResponse (a, { { "Filter", cube + 1 }, { "Morph", 0 }, { "Freq", y1k }, { "Transform", 0 }, { "Glide", 0.0 } }, 48000);
         NEAR (spectrumDb (h, 1000.0, 48000.0), -3.01, 0.02);
         for (double hz : { 30.0, 100.0, 300.0, 2000.0, 5000.0, 10000.0, 15000.0 })
             NEAR (spectrumDb (h, hz, 48000.0), butterworthDb (hz, 1000.0, 48000.0, cube == 1), 0.02);
     }
     {
         Instance a;
-        const auto h = impulseResponse (a, { { "Cube", 2 }, { "Morph", 0 }, { "Freq", 0.5 }, { "Transform", 0 }, { "Glide", 0.0 } }, 48000);
+        const auto h = impulseResponse (a, { { "Filter", 3 }, { "Morph", 0 }, { "Freq", 0.5 }, { "Transform", 0 }, { "Glide", 0.0 } }, 48000);
         auto peakNear = [&] (double hz) {
             double best = -1e9, at = 0.0;
             for (double f = hz * 0.8; f <= hz * 1.2; f *= 1.005)
@@ -526,13 +594,19 @@ void testKnownFilters()
 // The same input and changes give the same output, to the bit, in any block size.
 void testBlockSizes()
 {
-    const Stereo x = loop (48000.0, 1.5);
+    const Stereo x = loop (48000.0, 1.75);
     std::vector<Change> changes;
     {
         Instance probe;
-        changes = { { 0, probe.id ("Cube"), 6 }, { 0, probe.id ("LFO > Morph"), 0.8 }, { 0, probe.id ("LFO Sync"), 7 }, { 0, probe.id ("Env > Freq"), 0.6 },
-                    { 0, probe.id ("Spread"), 0.4 }, { 0, probe.id ("Drive"), 6 }, { 5003, probe.id ("Cube"), 11 }, { 9001, probe.id ("Mix"), 0.5 },
-                    { 20000, probe.id ("Freq"), 0.2 }, { 33333, probe.id ("Emphasis"), 0.7 }, { 47999, probe.id ("Drive"), 0 } };
+        changes = { { 0, probe.id ("Filter"), 7 }, { 0, probe.id ("LFO > Morph"), 0.8 }, { 0, probe.id ("LFO Sync"), 7 }, { 0, probe.id ("Env > Freq"), 0.6 },
+                    { 0, probe.id ("Spread"), 0.4 }, { 0, probe.id ("Drive"), 6 }, { 5003, probe.id ("Filter"), 12 }, { 9001, probe.id ("Mix"), 0.5 },
+                    { 20000, probe.id ("Freq"), 0.2 }, { 33333, probe.id ("Emphasis"), 0.7 }, { 47999, probe.id ("Drive"), 0 },
+                    // The sequencer: Acid Steps on sixteenths with a bar's Reset, the envelope on Dec, a gate, Deep Acid
+                    // distorted harder and faded slower, a Fade step put in.
+                    { 50000, probe.id ("Filter"), 17 }, { 50000, probe.id ("Left Dist"), 24 }, { 50000, probe.id ("Exit Fade"), 0.3 },
+                    { 50001, probe.id ("Sequence"), 5 }, { 50001, probe.id ("Inc Clock"), 11 }, { 50001, probe.id ("Reset Clock"), 1 },
+                    { 51111, probe.id ("Env Trigger"), 2 }, { 51111, probe.id ("Trig Level"), -24 }, { 60000, probe.id ("Inc"), 1 },
+                    { 60100, probe.id ("Inc"), 0 }, { 61000, probe.id ("Xform > Dist"), 1 } };
     }
     Stereo reference;
     for (uint32_t block : { 128u, 1u, 3u, 8u, 64u, 333u, 1024u, 4096u })
@@ -558,13 +632,13 @@ void testRouting()
     const Stereo x = loop (48000.0, 1.0);
     {
         Instance a;
-        a.setup ({ { "Mix", 0.0 }, { "Cube", 9 }, { "Drive", 12 } }, 1.0);
+        a.setup ({ { "Mix", 0.0 }, { "Filter", 10 }, { "Drive", 12 } }, 1.0);
         const Stereo o = a.run (x, 128);
         CHECK (o.l == x.l && o.r == x.r);
     }
     {
         Instance a;
-        a.setup ({ { "Cube", 2 }, { "Morph", 0.3 } });
+        a.setup ({ { "Filter", 3 }, { "Morph", 0.3 } });
         const Stereo o = a.run (x, 128, {}, 1);
         CHECK (o.l == o.r);
         CHECK (std::any_of (o.l.begin(), o.l.end(), [] (float v) { return std::fabs (v) > 1e-3f; }));
@@ -576,8 +650,8 @@ void testRouting()
     }
     {
         Instance a, b;
-        a.setup ({ { "Cube", 11 }, { "Spread", 0.7 }, { "LFO > Freq", 0.5 } });
-        b.setup ({ { "Cube", 11 }, { "Spread", 0.7 }, { "LFO > Freq", 0.5 } });
+        a.setup ({ { "Filter", 12 }, { "Spread", 0.7 }, { "LFO > Freq", 0.5 } });
+        b.setup ({ { "Filter", 12 }, { "Spread", 0.7 }, { "LFO > Freq", 0.5 } });
         const Stereo apart = a.run (x, 128);
         Stereo buffer = x;
         for (size_t at = 0; at < buffer.l.size(); at += 128) // the same buffers in and out
@@ -657,7 +731,7 @@ void demos (const std::string& folder)
     for (int c = 0; c < cortex::cubeCount; ++c)
     {
         Instance a;
-        a.setup ({ { "Cube", c }, { "Morph", 0.0 }, { "Freq", 0.1 }, { "Transform", 0.3 }, { "Glide", 1.0 } }, 0.05);
+        a.setup ({ { "Filter", c + 1 }, { "Morph", 0.0 }, { "Freq", 0.1 }, { "Transform", 0.3 }, { "Glide", 1.0 } }, 0.05);
         a.played = 0;
         const Stereo x2 = loop (48000.0, 2.0);
         const Stereo o = a.run (x2, 128, { { 0, a.id ("Freq"), 0.9 }, { 0, a.id ("Morph"), 1.0 } });
@@ -668,8 +742,9 @@ void demos (const std::string& folder)
 }
 
 // Melodee's screen: the page draws, follows the sound while it plays and the knobs while it does not, animates
-// only while sound runs, answers the wheel (cubes), Push (views) and Minus / Plus (groups), names K1-K3, and tells
-// the host what it changed. Its pictures go to OUT_FOLDER/screen-*.png.
+// only while sound runs, answers the wheel (filters), Push (views) and Minus / Plus (groups), edits, copies and
+// restores filters, programs a sequence, fires the sequencer's triggers, names K1-K3, and tells the host what it
+// changed. Its pictures go to OUT_FOLDER/screen-*.png.
 void testScreen (const std::string& folder)
 {
     Instance a;
@@ -715,18 +790,20 @@ void testScreen (const std::string& folder)
     CHECK (paint (true));
     now += 40;
     CHECK (! paint());
-    // CUBE: K1-K3 are Morph, Freq, Transform; the wheel steps through the cubes (and tells the host).
+    // CUBE: K1-K3 are Morph, Freq, Transform; the wheel loads the next filter in use (and tells the host, with the
+    // edit filter's fields that now show it).
     CHECK ((knobs() == std::vector<clap_id> { a.id ("Morph"), a.id ("Freq"), a.id ("Transform") }));
     const int flushesBefore = flushes;
     CHECK (in (MELODEE_SCREEN_WHEEL, 2));
-    CHECK (a.value ("Cube") == 2 && flushes > flushesBefore);
+    CHECK (a.value ("Filter") == 3 && a.value ("Cube") == 3 && flushes > flushesBefore);
     OutEvents told;
     a.run (Stereo { std::vector<float> (128, 0.0f), std::vector<float> (128, 0.0f) }, 128, {}, 2, &told);
-    CHECK (std::any_of (told.values.begin(), told.values.end(), [&] (auto& v) { return v.first == a.id ("Cube") && v.second == 2.0; }));
-    CHECK (in (MELODEE_SCREEN_WHEEL, -5) && a.value ("Cube") == 0);
-    CHECK (in (MELODEE_SCREEN_WHEEL, 99) && a.value ("Cube") == cortex::cubeCount - 1);
+    CHECK (std::any_of (told.values.begin(), told.values.end(), [&] (auto& v) { return v.first == a.id ("Filter") && v.second == 3.0; }));
+    CHECK (std::any_of (told.values.begin(), told.values.end(), [&] (auto& v) { return v.first == a.id ("Cube") && v.second == 3.0; }));
+    CHECK (in (MELODEE_SCREEN_WHEEL, -5) && a.value ("Filter") == 1);
+    CHECK (in (MELODEE_SCREEN_WHEEL, 99) && a.value ("Filter") == cortex::factoryFilterCount); // the last in use
     // A knob moved while no sound runs moves the point on the page.
-    a.setup ({ { "Cube", 2 }, { "Morph", 0.2 }, { "Freq", 0.5 }, { "Transform", 0.7 } }, 0.01);
+    a.setup ({ { "Filter", 3 }, { "Morph", 0.2 }, { "Freq", 0.5 }, { "Transform", 0.7 } }, 0.01);
     now += 1000;
     CHECK (paint());
     shot ("cube-still");
@@ -741,21 +818,30 @@ void testScreen (const std::string& folder)
     shot ("cube-morph");
     CHECK (in (MELODEE_SCREEN_PUSH, 0));
     // Spread: two points, two responses.
-    a.setup ({ { "Spread", 0.8 }, { "Cube", 5 }, { "LFO > Freq", 0.4 } }, 0.01);
+    a.setup ({ { "Spread", 0.8 }, { "Filter", 6 }, { "LFO > Freq", 0.4 } }, 0.01);
     play (1200);
     shot ("cube-spread");
-    // Other cubes for a look.
+    // Other cubes for a look (the factory's filter for each: the edit filter's Cube choice is its number).
     for (const char* name : { "Phase Drift", "Bell Tower", "Swirl", "Low To Band" })
     {
         double v = 0.0;
         a.params->text_to_value (a.plugin, a.id ("Cube"), name, &v);
-        a.setup ({ { "Cube", v }, { "Spread", 0.0 } }, 0.01);
+        a.setup ({ { "Filter", v }, { "Spread", 0.0 } }, 0.01);
         play (900);
         std::string file = std::string ("cube-") + name;
         std::replace (file.begin(), file.end(), ' ', '-');
         std::transform (file.begin(), file.end(), file.begin(), [] (char c) { return (char) std::tolower ((unsigned char) c); });
         shot (file.c_str());
     }
+    // Transform > Dist (F19 Vowel Crush, Transform up: the D bar and the distortion meters), then a sequence
+    // running (its place in the header).
+    a.setup ({ { "Filter", 19 }, { "Transform", 0.95 }, { "LFO > Morph", 0.0 }, { "LFO > Transform", 0.0 } }, 0.01);
+    play (900);
+    shot ("cube-distortion");
+    CHECK (a.loadPreset ("acid-sequence"));
+    play (1300);
+    shot ("cube-sequence");
+    a.setup ({ { "Sequence", 0 }, { "Filter", 1 } }, 0.01);
     // No sound for a while: the page stops moving, and asks for no paints.
     a.run (Stereo { std::vector<float> (48000, 0.0f), std::vector<float> (48000, 0.0f) }, 128);
     now += 2000;
@@ -765,15 +851,56 @@ void testScreen (const std::string& folder)
     const int quietPaints = paints;
     now += 40;
     CHECK (! paint() && paints == quietPaints);
-    // FILTER: Plus moves to the next group; K1-K3 follow the cursor; Push edits; the wheel changes Morph.
+
+    // FILTER: Plus moves to the next group; K1-K3 follow the cursor; Push edits the filter Filter picks (F01 here).
     CHECK (in (MELODEE_SCREEN_NUDGE, 1));
-    CHECK ((knobs() == std::vector<clap_id> { a.id ("Cube"), a.id ("Morph"), a.id ("Freq") }));
-    CHECK (in (MELODEE_SCREEN_WHEEL, 1) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, 16));
-    CHECK (std::fabs (a.value ("Morph") - (0.5 + 16.0 / 128.0)) < 1e-6);
-    CHECK (in (MELODEE_SCREEN_PUSH, 0));
+    CHECK ((knobs() == std::vector<clap_id> { a.id ("Filter"), a.id ("Cube"), a.id ("Morph Offset") }));
+    CHECK (in (MELODEE_SCREEN_WHEEL, 3) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, 20) && in (MELODEE_SCREEN_PUSH, 0));
+    CHECK (a.value ("Freq Offset") == 20);
     canvas.knobs[1] = { 90, false }; // K2 has yet to meet its value: the card shows where to move it
     shot ("filter");
     canvas.knobs[1] = { -1, true };
+    a.setup ({ { "Filter", 2 } }, 0.01);
+    CHECK (a.value ("Freq Offset") == 0);
+    a.setup ({ { "Filter", 1 } }, 0.01);
+    CHECK (a.value ("Freq Offset") == 20); // kept in F01
+    // Copy: into the first empty filter, which Filter then picks; Restore: two pushes, back to the factory's (empty).
+    CHECK (in (MELODEE_SCREEN_WHEEL, 12) && in (MELODEE_SCREEN_PUSH, 0));
+    CHECK (a.value ("Filter") == cortex::factoryFilterCount + 1 && a.value ("Freq Offset") == 20 && a.value ("Cube") == 1);
+    CHECK (in (MELODEE_SCREEN_WHEEL, 1) && in (MELODEE_SCREEN_PUSH, 0) && a.value ("Cube") == 1);
+    shot ("filter-restore");
+    CHECK (in (MELODEE_SCREEN_PUSH, 0) && a.value ("Cube") == 0 && a.value ("Freq Offset") == 0);
+    a.setup ({ { "Filter", 1 } }, 0.01);
+
+    // SEQ: off, it says so; K1 picks the sequence. With one, its steps; Push edits a step; while editing, Minus and
+    // Plus jump through the choices rather than leave; the step changes (the state saved shows it).
+    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    shot ("seq-off");
+    CHECK ((knobs() == std::vector<clap_id> { a.id ("Sequence"), a.id ("Inc Clock"), a.id ("Reset Clock") }));
+    CHECK (a.loadPreset ("acid-sequence"));
+    play (1300);
+    shot ("seq");
+    Memory beforeEdit, afterEdit;
+    CHECK (a.state->save (a.plugin, &beforeEdit.out));
+    CHECK (in (MELODEE_SCREEN_WHEEL, 2) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_WHEEL, 1));
+    shot ("seq-edit");
+    CHECK (in (MELODEE_SCREEN_PUSH, 0));
+    CHECK (a.state->save (a.plugin, &afterEdit.out) && afterEdit.bytes != beforeEdit.bytes);
+    // TRIG: Inc pressed asks the sound to run (even asleep) and steps the sequence.
+    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK ((knobs() == std::vector<clap_id> { a.id ("Sequence"), a.id ("Inc Clock"), a.id ("Dec Clock") }));
+    const int processesBefore = processes;
+    CHECK (in (MELODEE_SCREEN_WHEEL, 6) && in (MELODEE_SCREEN_PUSH, 0) && processes == processesBefore + 1);
+    play (200);
+    shot ("trig");
+    // KNOBS: the wheel changes Morph.
+    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    a.setup ({ { "Sequence", 0 }, { "Morph", 0.5 } }, 0.01);
+    CHECK ((knobs() == std::vector<clap_id> { a.id ("Morph"), a.id ("Freq"), a.id ("Transform") }));
+    CHECK (in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, 16));
+    CHECK (std::fabs (a.value ("Morph") - (0.5 + 16.0 / 128.0)) < 1e-6);
+    CHECK (in (MELODEE_SCREEN_PUSH, 0));
+    shot ("knobs");
     CHECK (in (MELODEE_SCREEN_NUDGE, 1));
     shot ("lfo");
     CHECK (in (MELODEE_SCREEN_NUDGE, 1));
@@ -781,18 +908,22 @@ void testScreen (const std::string& folder)
     CHECK (in (MELODEE_SCREEN_NUDGE, 1));
     shot ("out");
     CHECK (! in (MELODEE_SCREEN_NUDGE, 1)); // the last group
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 7; ++i)
         in (MELODEE_SCREEN_NUDGE, -1);
     canvas.shift = true;
     shot ("cube-shift");
     canvas.shift = false;
-    // MORPH view while the sound sleeps: Freq changed on the FILTER page, then back to CUBE. The page keeps asking for
+    // MORPH view while the sound sleeps: Freq changed on the KNOBS page, then back to CUBE. The page keeps asking for
     // paints until its landscape has caught up, then stops; painting more changes nothing.
     CHECK (in (MELODEE_SCREEN_PUSH, 0)); // MORPH
     now += 2000;
     paint();
-    CHECK (in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_WHEEL, 2) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, -40)
-           && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, -2) && in (MELODEE_SCREEN_NUDGE, -1));
+    for (int i = 0; i < 4; ++i)
+        CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK (in (MELODEE_SCREEN_WHEEL, 1) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, -40) && in (MELODEE_SCREEN_PUSH, 0)
+           && in (MELODEE_SCREEN_WHEEL, -1));
+    for (int i = 0; i < 4; ++i)
+        CHECK (in (MELODEE_SCREEN_NUDGE, -1));
     int asked = paints, rounds = 0;
     now += 40;
     paint();

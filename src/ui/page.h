@@ -7,7 +7,8 @@
 // The controls, as on hdslave Machine's page: the wheel moves the cursor a row; Push edits the row (the wheel then
 // changes it: a choice a step, a knob 1/128 of its range, 1/1024 with Shift; Push again leaves) or presses it if it
 // is a button; Minus / Plus go to the group before / after, or while editing move the value by a sixteenth (a choice
-// a step). K1-K3 turn the cursor's row and the two under it. Holding Shift shows these.
+// a step). K1-K3 turn the cursor's row and the two under it. Holding Shift shows these. A picture group takes the
+// wheel and Push itself, and Minus / Plus too while it says it is editing (customEditing).
 #pragma once
 
 #include "ui/font.h"
@@ -190,7 +191,7 @@ public:
     bool input (Key key, int amount, bool shift, Edits& out)
     {
         const Group& g = group();
-        if (g.count == 0 && key != Key::nudge)
+        if (g.count == 0 && (key != Key::nudge || customEditing()))
             return customInput (current, key, amount, shift, out);
         if (key == Key::nudge && ! editing)
         {
@@ -209,7 +210,7 @@ public:
         if (key == Key::push)
         {
             if (v.kind == Kind::button)
-                return out.press (field.id), true;
+                return pressed (field.id, out), true;
             editing = ! editing;
             return true;
         }
@@ -287,6 +288,8 @@ protected:
     virtual void drawPanel (Raster&, const Host&, int /* x */, int /* y */, int /* w */, int /* h */) {}  // beside a list
     virtual void drawCustom (Raster&, const Host&, int /* x */, int /* y */, int /* w */, int /* h */) {} // a picture group
     virtual bool customInput (int, Key, int, bool, Edits&) { return false; }
+    virtual bool customEditing() const { return false; }               // a picture group wants Minus / Plus now
+    virtual void pressed (uint32_t id, Edits& out) { out.press (id); } // a button row pushed
     virtual bool tallCustom() const { return false; } // a picture group takes the body and the cards' room
     virtual void customKnobs (int, uint32_t[3]) const {}
     virtual void legend (const char* lines[6]) const
@@ -473,7 +476,8 @@ private:
             Value v;
             read (ids[k], v);
             const int vw = textWidth (v.text, 7);
-            r.text (x + 20, y + 1, labelOf (ids[k]), c.muted, std::max (0, (w - 26 - vw) / font::glyphWidth));
+            const char* label = customLabel (ids[k]); // the strip is narrow: the page's short name, if it has one
+            r.text (x + 20, y + 1, label[0] != 0 ? label : labelOf (ids[k]), c.muted, std::max (0, (w - 26 - vw) / font::glyphWidth));
             r.text (x + w - 3 - vw, y + 1, v.text, hi, 7);
             drawBar (r, x + 3, y + stripH - 3, w - 6, v, hi, c.rule);
             if (host.pot[k] >= 0 && ! host.engaged[k])
@@ -512,6 +516,6 @@ private:
     }
 
 protected:
-    virtual const char* customLabel (uint32_t) const { return ""; }
+    virtual const char* customLabel (uint32_t) const { return ""; } // a short name for K1-K3's strip, "" for the list's
 };
 } // namespace hdui

@@ -34,16 +34,27 @@ int main (int argc, char** argv)
     plugin->start_processing (plugin);
 
     // worst: a seven-band cube, both sides apart (Spread), the point always moving (a fast LFO on all three axes
-    // and the envelope), Drive on. typical: a five-band cube moved slowly by the LFO. still: a cube standing still.
+    // and the envelope), Drive on. distort: the same with the filter's distortion on both sides. sequence: the same
+    // distorted, Acid Steps stepping every sixteenth (a filter change, its dip, every 125 ms). typical: a five-band cube
+    // moved slowly by the LFO. still: a cube standing still.
     std::vector<std::pair<uint32_t, double>> values;
     using namespace cortex::ParamId;
-    if (mode == "worst" || mode == "paint" || mode == "morph")
-        values = { { cube, 2 }, { spread, 0.6 }, { lfoRate, 0.9 }, { lfoMorph, 0.7 }, { lfoFreq, 0.5 }, { lfoTransform, 0.6 }, { envFreq, 0.4 },
+    if (mode == "worst" || mode == "paint" || mode == "morph" || mode == "distort" || mode == "sequence")
+    {
+        values = { { filter, 3 }, { spread, 0.6 }, { lfoRate, 0.9 }, { lfoMorph, 0.7 }, { lfoFreq, 0.5 }, { lfoTransform, 0.6 }, { envFreq, 0.4 },
                    { drive, 9 }, { mix, 0.8 } };
+        if (mode == "distort" || mode == "sequence")
+            for (uint32_t f : { 3u, 10u, 17u, 18u }) // the edit filter's fields change the filter Filter picks
+                values.insert (values.end(), { { filter, f }, { distLeft, 20 }, { distRight, 14 } });
+        if (mode == "distort")
+            values.push_back ({ filter, 3 });
+        if (mode == "sequence")
+            values.insert (values.end(), { { sequence, 5 }, { incClock, 11 } });
+    }
     else if (mode == "typical")
-        values = { { cube, 6 }, { lfoSync, 4 }, { lfoMorph, 0.5 } };
+        values = { { filter, 7 }, { lfoSync, 4 }, { lfoMorph, 0.5 } };
     else
-        values = { { cube, 4 }, { morph, 0.4 } };
+        values = { { filter, 5 }, { morph, 0.4 } };
 
     struct Events
     {

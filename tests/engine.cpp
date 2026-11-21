@@ -1,7 +1,8 @@
 // Cortex Filter's engine and filter maths, checked from the inside: the cubes' data, the blend between corners, every point's
 // filter being stable, the response maths against known filters, the LFO (shapes, rate, in step with the song,
-// stopped, jumps), the envelope follower, the glides, Spread, the point staying inside the cube, and the page
-// (its point and inputs) without a host.
+// stopped, jumps), the envelope follower, the glides, Spread, the point staying inside the cube, the sequencer (its
+// rules, clocks, triggers and fades), the filters' settings (Null, gains, offsets, Transform > Dist, distortion), and
+// the page (its point and inputs) without a host.
 //   engine-test
 #include "engine.h"
 #include "morph.h"
@@ -312,7 +313,7 @@ void testSound()
 {
     Engine e;
     e.prepare (48000.0, 512);
-    e.set (ParamId::mix, 0.0f), e.set (ParamId::cube, 9), e.set (ParamId::drive, 12.0f), e.set (ParamId::emphasis, 1.0f);
+    e.set (ParamId::mix, 0.0f), e.set (ParamId::filter, 10), e.set (ParamId::drive, 12.0f), e.set (ParamId::emphasis, 1.0f);
     e.reset();
     const Stereo x = loop (48000.0, 1.0);
     std::vector<float> l (x.l.size()), r (x.l.size());
@@ -324,7 +325,7 @@ void testSound()
 
     Engine m;
     m.prepare (48000.0, 512);
-    m.set (ParamId::cube, 2), m.set (ParamId::morph, 0.4f);
+    m.set (ParamId::filter, 3), m.set (ParamId::morph, 0.4f);
     m.reset();
     m.render (x.l.data(), x.l.data(), l.data(), r.data(), (uint32_t) l.size());
     bool mono = true;
@@ -334,7 +335,7 @@ void testSound()
 
     Engine loud;
     loud.prepare (48000.0, 512);
-    loud.set (ParamId::cube, 12), loud.set (ParamId::transform, 1.0f), loud.set (ParamId::emphasis, 1.0f), loud.set (ParamId::output, 12.0f);
+    loud.set (ParamId::filter, 13), loud.set (ParamId::transform, 1.0f), loud.set (ParamId::emphasis, 1.0f), loud.set (ParamId::output, 12.0f);
     loud.reset();
     const Stereo n = whiteNoise (48000, 1.0f, 3);
     loud.render (n.l.data(), n.r.data(), l.data(), r.data(), 48000);
@@ -355,7 +356,9 @@ void testPage()
     for (uint32_t i = 0; i < paramCount; ++i)
         values[i].store (paramTable[i].def);
     Feed feed;
-    Screen screen (values, feed);
+    Store store;
+    Commands commands;
+    Screen screen (values, feed, store, commands);
     std::vector<uint32_t> pixels (hdui::width * hdui::height);
     hdui::Host h;
     h.nowMs = 1000;
@@ -366,10 +369,10 @@ void testPage()
     screen.knobs (ids);
     CHECK (ids[0] == ParamId::morph && ids[1] == ParamId::freq && ids[2] == ParamId::transform);
     hdui::Edits edits;
-    CHECK (screen.input (hdui::Key::wheel, 3, false, edits) && edits.count == 1 && edits.list[0].id == ParamId::cube && edits.list[0].value == 3.0f);
+    CHECK (screen.input (hdui::Key::wheel, 3, false, edits) && edits.count == 1 && edits.list[0].id == ParamId::filter && edits.list[0].value == 4.0f);
     hdui::Edits none;
     CHECK (screen.input (hdui::Key::push, 0, false, none) && screen.morphView());
-    values[paramIndex (ParamId::cube)].store (3.0f);
+    values[paramIndex (ParamId::filter)].store (4.0f);
     values[paramIndex (ParamId::morph)].store (0.75f);
     h.nowMs += 50;
     screen.update (h.nowMs);
@@ -446,7 +449,7 @@ void testRates()
             // share is 1 - 1/e.
             Engine e;
             e.prepare (rate, 128);
-            e.set (ParamId::cube, 1), e.set (ParamId::morph, 0.0f), e.set (ParamId::freq, 0.5f), e.set (ParamId::transform, 0.0f);
+            e.set (ParamId::filter, 2), e.set (ParamId::morph, 0.0f), e.set (ParamId::freq, 0.5f), e.set (ParamId::transform, 0.0f);
             e.reset();
             const auto settled = quiet (e, second, 0.5f);
             CHECK (std::fabs (settled.back()) < 1e-4f);
@@ -493,11 +496,11 @@ void testReviewFixes()
         renderSide (a, noise, 0, 4800, true);
         a.set (ParamId::spread, 0.0f);
         renderSide (a, noise, 4800, 14400, true);
-        a.set (ParamId::cube, 7);
+        a.set (ParamId::filter, 8);
         renderSide (a, noise, 14400, 24000, true);
         a.set (ParamId::spread, 0.5f);
         const auto ra = renderSide (a, noise, 24000, 144000, true);
-        b.set (ParamId::cube, 7), b.set (ParamId::spread, 0.5f);
+        b.set (ParamId::filter, 8), b.set (ParamId::spread, 0.5f);
         b.reset();
         renderSide (b, noise, 0, 24000, true);
         const auto rb = renderSide (b, noise, 24000, 144000, true);
@@ -513,7 +516,7 @@ void testReviewFixes()
         good.l[1000] = 0.0f, good.r[30000] = 0.0f;
         Engine a, b;
         for (Engine* e : { &a, &b })
-            e->prepare (48000.0, 512), e->set (ParamId::envFreq, 0.5f), e->set (ParamId::cube, 2), e->reset();
+            e->prepare (48000.0, 512), e->set (ParamId::envFreq, 0.5f), e->set (ParamId::filter, 3), e->reset();
         std::vector<float> al (bad.l.size()), ar (bad.l.size()), bl (bad.l.size()), br (bad.l.size());
         a.render (bad.l.data(), bad.r.data(), al.data(), ar.data(), (uint32_t) al.size());
         b.render (good.l.data(), good.r.data(), bl.data(), br.data(), (uint32_t) bl.size());
@@ -531,7 +534,7 @@ void testReviewFixes()
         // Drive from 0 dB to a little: on a tone at -1 dBFS the output moves no faster than the tone does.
         Engine e;
         e.prepare (48000.0, 512);
-        e.set (ParamId::cube, 13), e.set (ParamId::morph, 0.5f), e.set (ParamId::transform, 0.0f);
+        e.set (ParamId::filter, 14), e.set (ParamId::morph, 0.5f), e.set (ParamId::transform, 0.0f);
         e.reset();
         Stereo tone { std::vector<float> (24000), std::vector<float> (24000) };
         for (size_t i = 0; i < tone.l.size(); ++i)
@@ -551,11 +554,11 @@ void testReviewFixes()
         // From a ringing Bell Tower to Low To Band while the loop plays: a dip to silence, no burst above either cube.
         Engine e;
         e.prepare (48000.0, 512);
-        e.set (ParamId::cube, 7), e.set (ParamId::transform, 1.0f), e.set (ParamId::emphasis, 1.0f);
+        e.set (ParamId::filter, 8), e.set (ParamId::transform, 1.0f), e.set (ParamId::emphasis, 1.0f);
         e.reset();
         const Stereo music = loop (48000.0, 2.0);
         const auto before = renderSide (e, music, 0, 48000, false);
-        e.set (ParamId::cube, 0);
+        e.set (ParamId::filter, 1);
         const auto after = renderSide (e, music, 48000, 52800, false);
         float peakBefore = 0.0f, peakAfter = 0.0f, quietest = 1.0f;
         for (size_t i = 24000; i < before.size(); ++i)
@@ -567,13 +570,360 @@ void testReviewFixes()
         // The new cube on its own, the same passage: the switch may be as loud as either cube, never louder.
         Engine fresh;
         fresh.prepare (48000.0, 512);
-        fresh.set (ParamId::cube, 0), fresh.set (ParamId::transform, 1.0f), fresh.set (ParamId::emphasis, 1.0f);
+        fresh.set (ParamId::filter, 1), fresh.set (ParamId::transform, 1.0f), fresh.set (ParamId::emphasis, 1.0f);
         fresh.reset();
         renderSide (fresh, music, 0, 48000, false);
         float peakFresh = 0.0f;
         for (float v : renderSide (fresh, music, 48000, 52800, false))
             peakFresh = std::max (peakFresh, std::fabs (v));
         CHECK (peakAfter <= std::max (peakBefore, peakFresh) * 1.05f && quietest < 0.02f);
+    }
+}
+
+// The sequencer's rules, as the module's manual has them: Inc and Dec move circularly and load the filter there;
+// Pause and Halt stop them (a Reset ends a Pause without moving; out of a Halt it goes to the first step); a Bumper
+// is a wall, and at the first step a Pause already ended; Fade scales what follows; the wheel skips the commands.
+void testSequencer()
+{
+    Store st;
+    auto program = [&] (int q, std::initializer_list<int> steps) {
+        uint8_t list[maxSteps] = {};
+        int n = 0;
+        for (int code : steps)
+            list[n++] = (uint8_t) code;
+        st.setSequence (q, list, n);
+    };
+    Sequencer s;
+    program (9, { 1, 2, stepPause, 3, stepHalt, 4 });
+    s.load (st, 9);
+    CHECK (s.on (st) && s.pos == 0 && s.filter == 1 && s.mode == Sequencer::Mode::normal);
+    s.inc (st);
+    CHECK (s.pos == 1 && s.filter == 2);
+    s.inc (st);
+    CHECK (s.pos == 2 && s.filter == 2 && s.mode == Sequencer::Mode::paused);
+    s.inc (st), s.dec (st);
+    CHECK (s.pos == 2 && s.mode == Sequencer::Mode::paused); // a Pause holds against Inc and Dec
+    s.reset (st);
+    CHECK (s.pos == 2 && s.mode == Sequencer::Mode::normal); // ended, nothing moved
+    s.inc (st);
+    CHECK (s.pos == 3 && s.filter == 3);
+    s.inc (st);
+    CHECK (s.pos == 4 && s.mode == Sequencer::Mode::halted);
+    s.inc (st);
+    CHECK (s.pos == 4);
+    s.reset (st);
+    CHECK (s.pos == 0 && s.filter == 1 && s.mode == Sequencer::Mode::normal); // out of a Halt: the first step
+    s.dec (st);
+    CHECK (s.pos == 5 && s.filter == 4); // round the end
+    s.inc (st);
+    CHECK (s.pos == 0 && s.filter == 1);
+
+    program (10, { stepBumper, 1, 2, stepBumper });
+    s.load (st, 10);
+    CHECK (s.pos == 0 && s.filter == 0 && s.mode == Sequencer::Mode::normal); // a Bumper first: a Pause already ended
+    s.inc (st), s.inc (st);
+    CHECK (s.pos == 2 && s.filter == 2);
+    s.inc (st);
+    CHECK (s.pos == 2); // the wall
+    s.dec (st), s.dec (st);
+    CHECK (s.pos == 1 && s.filter == 1);
+
+    program (11, { stepFade + 3, 1, stepFade + 8, 2 });
+    s.load (st, 11);
+    CHECK (s.fade == 3 && s.filter == 0);
+    s.inc (st);
+    CHECK (s.fade == 3 && s.filter == 1);
+    s.inc (st), s.inc (st);
+    CHECK (s.fade == 8 && s.filter == 2 && fadeScales[s.fade] == 8.0f);
+
+    program (12, { 1, stepPause, 2, stepHalt, 3 });
+    s.load (st, 12);
+    s.browse (st, 1);
+    CHECK (s.pos == 2 && s.filter == 2 && s.mode == Sequencer::Mode::normal); // past the Pause, which does nothing
+    s.browse (st, 2);
+    CHECK (s.pos == 0 && s.filter == 1);
+    s.browse (st, -1);
+    CHECK (s.pos == 4 && s.filter == 3);
+
+    program (13, { stepHalt, 1 });
+    s.load (st, 13);
+    CHECK (s.mode == Sequencer::Mode::halted);
+    s.inc (st);
+    CHECK (s.pos == 0);
+    s.reset (st);
+    CHECK (s.pos == 0 && s.mode == Sequencer::Mode::halted); // a Halt first: it never gets further
+    s.load (st, 14);
+    CHECK (! s.on (st)); // empty
+    s.inc (st), s.reset (st);
+    CHECK (s.pos == 0 && s.filter == 0);
+    // The factory's sequences are all filters in use or commands.
+    for (int q = 1; q <= factorySequenceCount; ++q)
+        for (int i = 0; i < st.length (q); ++i)
+        {
+            const int code = st.step (q, i);
+            CHECK ((isFilterStep (code) && st.used (code)) || code == stepPause || code == stepHalt || code == stepBumper || isFadeStep (code));
+        }
+    // Steps put in, taken out, added.
+    program (15, { 1, 2, 3 });
+    CHECK (st.insertStep (15, 1, stepPause) && st.length (15) == 4 && st.step (15, 1) == stepPause && st.step (15, 3) == 3);
+    CHECK (st.deleteStep (15, 0) && st.length (15) == 3 && st.step (15, 0) == stepPause && st.step (15, 3) == 0);
+    for (int i = 0; i < maxSteps; ++i)
+        st.insertStep (15, st.length (15), 1);
+    CHECK (st.length (15) == maxSteps && ! st.insertStep (15, 0, 1));
+}
+
+// An engine in 8-frame blocks with the song playing at 120 bpm from beat 0 (a beat is 24000 frames at 48 kHz).
+struct Song
+{
+    Engine e;
+    std::vector<float> in[2], out[2];
+    uint64_t at = 0;
+    bool playing = true;
+    explicit Song (double rate = 48000.0)
+    {
+        e.prepare (rate, 8);
+        for (auto* v : { &in[0], &in[1], &out[0], &out[1] })
+            v->assign (8, 0.0f);
+    }
+    void level (float v)
+    {
+        for (int c = 0; c < 2; ++c)
+            std::fill (in[c].begin(), in[c].end(), v);
+    }
+    // `frames` more, the output's left side kept if `keep`.
+    void run (uint64_t frames, std::vector<float>* keep = nullptr)
+    {
+        for (uint64_t f = 0; f < frames; f += 8, at += 8)
+        {
+            e.transport (playing, true, (double) at / 24000.0, 120.0);
+            e.render (in[0].data(), in[1].data(), out[0].data(), out[1].data(), 8);
+            if (keep != nullptr)
+                keep->insert (keep->end(), out[0].begin(), out[0].end());
+        }
+    }
+};
+
+void program (Store& st, int q, std::initializer_list<int> steps)
+{
+    uint8_t list[maxSteps] = {};
+    int n = 0;
+    for (int code : steps)
+        list[n++] = (uint8_t) code;
+    st.setSequence (q, list, n);
+}
+
+// A Null filter in a spare slot, its fades as given.
+void nullFilter (Store& st, int slot, float enter, float exit)
+{
+    st.setField (slot, fieldCube, 0.0f);
+    st.setField (slot, fieldEnter, fadeKnob (enter));
+    st.setField (slot, fieldExit, fadeKnob (exit));
+}
+
+void testSequencerEngine()
+{
+    // Inc Clock 1/4: a step each beat, none at the start; Reset Clock 1 Bar: back to the first step on each bar,
+    // even with an Inc on the same beat.
+    {
+        Song s;
+        program (s.e.bank(), 9, { 1, 2, 3, 4, 5, 6 });
+        s.e.set (ParamId::sequence, 9), s.e.set (ParamId::incClock, 7), s.e.set (ParamId::resetClock, 1);
+        s.e.reset();
+        s.run (23992);
+        CHECK (s.e.sequencer().pos == 0 && s.e.slotNow() == 1);
+        s.run (16);
+        CHECK (s.e.sequencer().pos == 1);
+        s.run (400); // past the dip: 3 ms out, 3 ms in
+        CHECK (s.e.slotNow() == 2);
+        s.run (24000 * 2);
+        CHECK (s.e.sequencer().pos == 3);
+        s.run (24000);
+        CHECK (s.e.sequencer().pos == 0); // beat 4: Inc, then Reset
+        // Stopped, the clocks stop; started again, the sequence starts again.
+        s.run (24000);
+        CHECK (s.e.sequencer().pos == 1);
+        s.playing = false;
+        s.run (48000);
+        CHECK (s.e.sequencer().pos == 1);
+        s.playing = true;
+        s.run (8);
+        CHECK (s.e.sequencer().pos == 0);
+    }
+    // Dec Clock walks back; the gates fire on their rising edge only; the page's triggers and wheel.
+    {
+        Song s;
+        program (s.e.bank(), 9, { 1, 2, 3, 4 });
+        s.e.set (ParamId::sequence, 9), s.e.set (ParamId::incClock, 0), s.e.set (ParamId::decClock, 4); // a bar
+        s.e.reset();
+        s.run (96000 + 8);
+        CHECK (s.e.sequencer().pos == 3);
+        s.e.set (ParamId::trigInc, 1.0f), s.e.set (ParamId::trigInc, 1.0f);
+        s.run (8);
+        CHECK (s.e.sequencer().pos == 0);
+        s.e.set (ParamId::trigInc, 0.0f), s.e.set (ParamId::trigInc, 1.0f), s.e.set (ParamId::trigDec, 1.0f);
+        s.run (8);
+        CHECK (s.e.sequencer().pos == 0); // Inc then Dec
+        s.e.trigger (0, 2), s.e.browse (-1);
+        s.run (8);
+        CHECK (s.e.sequencer().pos == 1);
+        const uint32_t fired = s.e.triggerCount();
+        s.e.set (ParamId::trigReset, 1.0f);
+        s.run (8);
+        CHECK (s.e.sequencer().pos == 0 && s.e.triggerCount() == fired + 1);
+    }
+    // The envelope as a trigger: one Inc for each burst over Trig Level, none while it stays over it.
+    {
+        Song s;
+        s.playing = false;
+        program (s.e.bank(), 9, { 1, 2, 3, 4, 5 });
+        s.e.set (ParamId::sequence, 9), s.e.set (ParamId::envTrigger, 1), s.e.set (ParamId::trigLevel, -20.0f);
+        s.e.set (ParamId::envAttack, attackKnob (0.001f)), s.e.set (ParamId::envRelease, releaseKnob (0.02f));
+        s.e.reset();
+        for (int burst = 0; burst < 3; ++burst)
+        {
+            s.level (0.5f);
+            s.run (4800);
+            s.level (0.0f);
+            s.run (9600);
+        }
+        CHECK (s.e.sequencer().pos == 3);
+        s.e.set (ParamId::envTrigger, 3); // now Reset
+        s.level (0.5f);
+        s.run (4800);
+        CHECK (s.e.sequencer().pos == 0);
+    }
+    // Fades: from one Null filter to another, the sound dips over the first's Exit Fade and comes back over the
+    // second's Enter Fade, scaled by a Fade step.
+    for (int scaled = 0; scaled < 2; ++scaled)
+    {
+        Song s;
+        s.playing = false;
+        Store& st = s.e.bank();
+        nullFilter (st, 40, 0.01f, 0.05f), nullFilter (st, 41, 0.1f, 0.01f);
+        program (st, 9, { stepFade + (scaled ? 6 : 5), 40, 41 });
+        s.e.set (ParamId::sequence, 9), s.e.set (ParamId::filter, 40);
+        s.e.reset();
+        s.level (0.5f);
+        s.run (4800);
+        std::vector<float> out;
+        s.e.trigger (0); // to filter 40: no change
+        s.e.trigger (0); // the next run's first step: to 41
+        s.run (8);
+        s.run (48000, &out);
+        const double k = scaled ? 2.0 : 1.0, exit = 0.05 * 48000 * k, enter = 0.1 * 48000 * k;
+        NEAR (out[(size_t) (exit / 2)], 0.25, 0.01);
+        NEAR (out[(size_t) (exit + enter / 2)], 0.25, 0.01);
+        CHECK (out[(size_t) (exit + enter + 100)] == 0.5f);
+        CHECK (s.e.slotNow() == 41);
+    }
+}
+
+void testFilterSettings()
+{
+    const Stereo x = loop (48000.0, 1.0);
+    std::vector<float> l (x.l.size()), r (x.l.size());
+    // Null (F32, Bypass): the input to the bit.
+    {
+        Engine e;
+        e.prepare (48000.0, 512);
+        e.set (ParamId::filter, 32);
+        e.reset();
+        e.render (x.l.data(), x.r.data(), l.data(), r.data(), (uint32_t) l.size());
+        CHECK (l == x.l && r == x.r);
+    }
+    // Each side's gain: -6 dB left, +6 dB right on a Null filter.
+    {
+        Engine e;
+        e.prepare (48000.0, 512);
+        e.bank().setField (40, fieldCube, 0.0f), e.bank().setField (40, fieldGainLeft, -6.0f), e.bank().setField (40, fieldGainRight, 6.0f);
+        e.set (ParamId::filter, 40);
+        e.reset();
+        std::vector<float> in (4800, 0.1f);
+        e.render (in.data(), in.data(), l.data(), r.data(), 4800);
+        NEAR (l[4000], 0.1 * std::pow (10.0, -6.0 / 20.0), 1e-6);
+        NEAR (r[4000], 0.1 * std::pow (10.0, 6.0 / 20.0), 1e-6);
+    }
+    // Offsets and gains move and scale the point around the middle; the point stays inside the cube.
+    {
+        Rig rig;
+        Store& st = rig.e.bank();
+        st.setField (1, fieldFreqOffset, 40.0f), st.setField (1, fieldMorphGain, -10.0f), st.setField (1, fieldTransformGain, 20.0f);
+        rig.e.set (ParamId::glide, 0.0f), rig.e.set (ParamId::morph, 0.2f), rig.e.set (ParamId::freq, 0.6f), rig.e.set (ParamId::transform, 0.7f);
+        rig.e.reset();
+        rig.block (false, false, 0.0);
+        NEAR (rig.e.left().x, 0.8, 1e-6);
+        NEAR (rig.e.left().y, 0.8, 1e-6);
+        NEAR (rig.e.left().z, 0.9, 1e-6);
+        rig.e.set (ParamId::transform, 1.0f);
+        for (int i = 0; i < 100; ++i)
+            rig.block (false, false, 0.0);
+        CHECK (rig.e.left().z == 1.0f);
+        NEAR (rig.e.control (2), 1.0, 1e-6);
+    }
+    // Transform > Dist: Transform sits at its offset; the knob drives the distortion. At its bottom (-30 dB and
+    // more under it) there is none: the same sound as the filter with Transform at the offset.
+    {
+        const Stereo tone = [] {
+            Stereo t { std::vector<float> (24000), std::vector<float> (24000) };
+            for (size_t i = 0; i < t.l.size(); ++i)
+                t.l[i] = t.r[i] = 0.5f * std::sin (2.0f * pi * 220.0f * (float) i / 48000.0f);
+            return t;
+        }();
+        auto render = [&] (bool drives, float knob) {
+            Engine e;
+            e.prepare (48000.0, 512);
+            e.bank().setField (10, fieldTransformDist, drives ? 1.0f : 0.0f), e.bank().setField (10, fieldTransformOffset, drives ? 40.0f : 0.0f);
+            e.set (ParamId::filter, 10), e.set (ParamId::glide, 0.0f), e.set (ParamId::transform, drives ? knob : 0.7f), e.set (ParamId::morph, 0.3f);
+            e.reset();
+            std::vector<float> a (tone.l.size()), b (tone.l.size());
+            e.render (tone.l.data(), tone.r.data(), a.data(), b.data(), (uint32_t) a.size());
+            CHECK (std::fabs (e.left().z - 0.7f) < 1e-6f);
+            return a;
+        };
+        const auto plain = render (false, 0.0f), clean = render (true, 0.0f), driven = render (true, 1.0f);
+        CHECK (clean == plain);
+        double differ = 0.0, peak = 0.0;
+        for (size_t i = 0; i < driven.size(); ++i)
+            differ = std::max (differ, (double) std::fabs (driven[i] - plain[i])), peak = std::max (peak, (double) std::fabs (driven[i]));
+        CHECK (differ > 0.01 && peak <= 2.0);
+    }
+    // Distortion on one side only: the other side is as it was, to the bit; the distorted side stays finite and
+    // within the limit on loud noise, and its meter shows it bending.
+    {
+        const Stereo n = whiteNoise (48000, 1.0f, 8);
+        auto render = [&] (float left, float right, float* meters) {
+            Engine e;
+            e.prepare (48000.0, 512);
+            e.bank().setField (8, fieldDistLeft, left), e.bank().setField (8, fieldDistRight, right);
+            e.set (ParamId::filter, 8), e.set (ParamId::transform, 1.0f);
+            e.reset();
+            Stereo o { std::vector<float> (n.l.size()), std::vector<float> (n.l.size()) };
+            e.render (n.l.data(), n.r.data(), o.l.data(), o.r.data(), (uint32_t) o.l.size());
+            e.takeBend (meters);
+            return o;
+        };
+        float m[2], quiet[2];
+        const Stereo a = render (40.0f, -30.0f, m), b = render (-30.0f, -30.0f, quiet);
+        CHECK (a.r == b.r && a.l != b.l);
+        bool ok = true;
+        for (float v : a.l)
+            ok &= std::isfinite (v) && std::fabs (v) <= 2.0f;
+        CHECK (ok && m[0] > 1.0f && m[1] == 0.0f && quiet[0] == 0.0f);
+    }
+    // An empty filter is heard as Null; every factory filter is in use, and the rest of the bank empty.
+    {
+        Store st;
+        for (int s = 1; s <= slotCount; ++s)
+            CHECK (st.used (s) == (s <= factoryFilterCount));
+        CHECK (st.cubeOf (50) == -1 && std::strcmp (st.name (50), "--empty--") == 0 && std::strcmp (st.name (7), "Wah Talk") == 0);
+        CHECK (std::strcmp (st.name (17), "Deep Acid") == 0 && st.cubeOf (32) == -1 && st.used (32));
+        st.copy (17, 50);
+        CHECK (st.used (50) && std::strcmp (st.name (50), "Deep Acid") == 0 && st.field (50, fieldFreqOffset) == -30.0f);
+        CHECK (st.emptyAfter (49) == 51 && st.emptyAfter (64) == 33 && st.usedFrom (32, 1) == 50 && st.usedFrom (50, -1) == 32);
+        st.factorySlot (50);
+        CHECK (! st.used (50));
+        // 0.1.0's dip for a cube change: 3 ms, exactly.
+        CHECK (fadeSeconds (fadeDefault) == 0.003f && st.field (1, fieldEnter) == fadeDefault);
     }
 }
 
@@ -585,6 +935,8 @@ void testTextEdges()
     const Edge edges[] = {
         { ParamId::glide, glideKnob (0.09996f) }, { ParamId::glide, glideKnob (0.009996f) }, { ParamId::glide, glideKnob (0.9996f) },
         { ParamId::envAttack, attackKnob (0.0009996f) }, { ParamId::envRelease, releaseKnob (0.9996f) }, { ParamId::lfoRate, lfoKnob (0.9996f) },
+        { ParamId::enterFade, fadeKnob (0.09996f) }, { ParamId::exitFade, fadeKnob (0.9996f) }, { ParamId::enterFade, fadeDefault },
+        { ParamId::morphGain, -99.0f }, { ParamId::freqOffset, -100.0f }, { ParamId::distLeft, 70.0f },
     };
     for (const Edge& e : edges)
     {
@@ -624,6 +976,9 @@ int main()
     testPage();
     testReviewFixes();
     testRates();
+    testSequencer();
+    testSequencerEngine();
+    testFilterSettings();
     testTextEdges();
     testPresets();
     std::printf ("engine: %d checks, %d failed\n", checks, failures);

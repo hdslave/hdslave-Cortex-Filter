@@ -1,7 +1,7 @@
 // Cortex Filter: a stereo 3D morphing filter as a CLAP effect, made for the Akai MPC Sample. This file is the CLAP side: the
 // factory, ports, parameters, state, presets, Melodee's screen and the process call, which cuts the block at each
 // event so every change lands on its frame. The sound is in engine.h, the filter's maths in morph.h, the cubes in
-// cubes.h, the page in screen.h.
+// cubes.h, the filters, sequences and sequencer in filters.h, the page in screen.h.
 #include "engine.h"
 #include "params.h"
 #include "presets.h"
@@ -25,7 +25,7 @@ const char* const features[] = { CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_F
 const clap_plugin_descriptor descriptor {
     CLAP_VERSION, "com.hdslave.cortex-filter", "hdslave Cortex Filter", "hdslave", "", "", "", CORTEX_VERSION,
     "A stereo filter that morphs through a cube of eight complex filters: Morph, Freq and Transform pick the point, an "
-    "LFO and an envelope follower move it, and the screen shows it in 3D",
+    "LFO and an envelope follower move it, a sequencer steps through a bank of filters, and the screen shows it in 3D",
     features,
 };
 
@@ -46,9 +46,11 @@ struct Plugin
     // the host from the next process or flush, a bit a row) and whether an input asked for a paint now.
     const clap_host_melodee_screen* hostScreen = nullptr;
     Feed feed;
-    Screen screen { values, feed };
+    Commands commands;
+    Screen screen { values, feed, engine.bank(), commands };
     std::atomic<uint64_t> outgoing { 0 };
     std::atomic<bool> paintAsked { false };
+    std::atomic<uint32_t> meterUntil { 0 }; // the page's meters are kept up until this block (about a second after a paint)
     uint32_t sincePaint = 0; // frames since the audio thread last asked for a paint
 };
 
@@ -104,11 +106,17 @@ bool paramsValue (const clap_plugin* plugin, clap_id id, double* value)
     return true;
 }
 
-bool paramsToText (const clap_plugin*, clap_id id, double value, char* text, uint32_t size)
+bool paramsToText (const clap_plugin* plugin, clap_id id, double value, char* text, uint32_t size)
 {
     const int index = paramIndex (id);
     if (index < 0 || size == 0)
         return false;
+    if (id == ParamId::filter) // its number and its name: "F07 Bell Tower"
+    {
+        const int slot = (int) clampParam (paramTable[index], (float) value);
+        std::snprintf (text, size, "F%02d %s", slot, of (plugin).engine.bank().name (slot));
+        return true;
+    }
     formatParam (paramTable[index], (float) value, text, size);
     return true;
 }
@@ -125,6 +133,49 @@ bool paramsFromText (const clap_plugin*, clap_id id, const char* text, double* v
     return true;
 }
 
+// The filter the edit filter's parameters show and change: the one Filter picks.
+int editSlot (const Plugin& p) { return (int) p.values[paramIndex (ParamId::filter)].load (std::memory_order_relaxed); }
+
+// The edit filter's parameters show filter `slot`'s settings; those that moved are told to the host. (`applied` is
+// the audio thread's: the main thread leaves it, and the next block sees the new values and passes them by.)
+void showFilter (Plugin& p, int slot, bool audio)
+{
+    const Store& bank = p.engine.bank();
+    for (int f = 0; f < fieldCount; ++f)
+    {
+        const int index = paramIndex (fieldParam (f));
+        const float v = bank.field (slot, f);
+        if (p.values[index].load (std::memory_order_relaxed) != v)
+        {
+            p.values[index].store (v, std::memory_order_relaxed);
+            if (audio)
+                p.applied[index] = v;
+            p.outgoing.fetch_or (1ull << index, std::memory_order_release);
+        }
+    }
+}
+
+// A parameter's new value, on the thread it arrives on: kept, and on the audio thread given to the engine (the main
+// thread's reach it at the next block). An edit filter's field goes into the bank's filter that Filter picks; a new
+// Filter shows its settings in those fields.
+void setValue (Plugin& p, int index, float value, bool audio)
+{
+    const Param& info = paramTable[index];
+    value = clampParam (info, value);
+    p.values[index].store (value, std::memory_order_relaxed);
+    if (isEditField (info.id))
+    {
+        p.engine.bank().setField (editSlot (p), (int) (info.id - ParamId::editCube), value);
+        if (audio)
+            p.applied[index] = value;
+        return;
+    }
+    if (audio)
+        p.applied[index] = value, p.engine.set (info.id, value);
+    if (info.id == ParamId::filter)
+        showFilter (p, (int) value, audio);
+}
+
 // One event: parameter values go to the engine at once.
 void handle (Plugin& p, const clap_event_header* e)
 {
@@ -132,12 +183,8 @@ void handle (Plugin& p, const clap_event_header* e)
         return;
     const auto* v = reinterpret_cast<const clap_event_param_value*> (e);
     const int index = paramIndex (v->param_id);
-    if (index < 0)
-        return;
-    const float value = clampParam (paramTable[index], (float) v->value);
-    p.values[index].store (value, std::memory_order_relaxed);
-    p.applied[index] = value;
-    p.engine.set (paramTable[index].id, value);
+    if (index >= 0)
+        setValue (p, index, (float) v->value, true);
 }
 
 void paramsFlush (const clap_plugin* plugin, const clap_input_events* in, const clap_output_events* out)
@@ -155,7 +202,7 @@ void paramsFlush (const clap_plugin* plugin, const clap_input_events* in, const 
             const int index = paramIndex (v->param_id);
             if (index >= 0)
             {
-                p.values[index].store (clampParam (paramTable[index], (float) v->value), std::memory_order_relaxed);
+                setValue (p, index, (float) v->value, false);
                 p.mainChanged.store (true, std::memory_order_release);
                 changed = true;
             }
@@ -169,9 +216,12 @@ void paramsFlush (const clap_plugin* plugin, const clap_input_events* in, const 
 const clap_plugin_params paramsExtension { paramsCount, paramsInfo, paramsValue, paramsToText, paramsFromText, paramsFlush };
 
 // State: "CRTX", a version, the number of values, then (id, value) pairs; unknown ids are skipped, missing ones keep
-// their defaults, so a state saved by another version still loads.
-constexpr char stateTag[4] = { 'C', 'R', 'T', 'X' };
-constexpr uint32_t stateVersion = 1;
+// their defaults, so a state saved by another version still loads. From version 2 the bank follows: "BANK", the
+// number of filters and of fields, then each filter (in use, its own name or not, its name in 12 bytes, its fields);
+// then "SEQS", the number of sequences and of steps, then each sequence (its length, its steps). A version 1 state
+// (0.1.0) has no bank: its Cube (id 0) loads as the factory's filter for that cube.
+constexpr char stateTag[4] = { 'C', 'R', 'T', 'X' }, bankTag[4] = { 'B', 'A', 'N', 'K' }, seqsTag[4] = { 'S', 'E', 'Q', 'S' };
+constexpr uint32_t stateVersion = 2;
 
 bool writeAll (const clap_ostream* s, const void* data, uint64_t size)
 {
@@ -201,15 +251,18 @@ bool readAll (const clap_istream* s, void* data, uint64_t size)
     return true;
 }
 
-// Every value at once, from the main thread (a state or a preset loaded).
+// Every value at once, from the main thread (a state or a preset loaded). The edit filter's fields are not taken
+// from `values`: they show the bank's filter that Filter picks.
 void setAll (Plugin& p, const float* values)
 {
     for (uint32_t i = 0; i < paramCount; ++i)
-        p.values[i].store (values[i], std::memory_order_relaxed);
+        if (! isEditField (paramTable[i].id))
+            p.values[i].store (values[i], std::memory_order_relaxed);
+    showFilter (p, editSlot (p), false);
     p.mainChanged.store (true, std::memory_order_release);
     if (! p.active) // not processing: the engine takes them now; otherwise at the next block
         for (uint32_t i = 0; i < paramCount; ++i)
-            p.applied[i] = values[i], p.engine.set (paramTable[i].id, values[i]);
+            p.applied[i] = p.values[i].load (std::memory_order_relaxed), p.engine.set (paramTable[i].id, p.applied[i]);
     if (p.hostScreen != nullptr)
         p.hostScreen->request_paint (p.host);
 }
@@ -226,6 +279,92 @@ bool stateSave (const clap_plugin* plugin, const clap_ostream* stream)
         if (! writeAll (stream, &pair, sizeof (pair)))
             return false;
     }
+    const Store& bank = p.engine.bank();
+    const uint32_t sizes[2] = { (uint32_t) slotCount, (uint32_t) fieldCount };
+    if (! writeAll (stream, bankTag, 4) || ! writeAll (stream, sizes, sizeof (sizes)))
+        return false;
+    for (int s = 1; s <= slotCount; ++s)
+    {
+        uint8_t head[2 + nameLength] = {};
+        head[0] = bank.used (s) ? 1 : 0;
+        head[1] = bank.ownName (s) ? 1 : 0;
+        if (head[1] != 0)
+            std::strncpy (reinterpret_cast<char*> (head + 2), bank.name (s), nameLength);
+        float fields[fieldCount];
+        for (int f = 0; f < fieldCount; ++f)
+            fields[f] = bank.field (s, f);
+        if (! writeAll (stream, head, sizeof (head)) || ! writeAll (stream, fields, sizeof (fields)))
+            return false;
+    }
+    const uint32_t seqSizes[2] = { (uint32_t) sequenceCount, (uint32_t) maxSteps };
+    if (! writeAll (stream, seqsTag, 4) || ! writeAll (stream, seqSizes, sizeof (seqSizes)))
+        return false;
+    for (int q = 1; q <= sequenceCount; ++q)
+    {
+        uint8_t seq[1 + maxSteps] = {};
+        seq[0] = (uint8_t) bank.length (q);
+        for (int i = 0; i < maxSteps; ++i)
+            seq[1 + i] = (uint8_t) bank.step (q, i);
+        if (! writeAll (stream, seq, sizeof (seq)))
+            return false;
+    }
+    return true;
+}
+
+// The bank and the sequences of a version 2 state, after its values: each part read whole before any of it is used,
+// so a cut-off state changes nothing. Counts other than this version's are read as far as both go.
+bool loadBank (Plugin& p, const clap_istream* stream)
+{
+    char tag[4];
+    uint32_t sizes[2];
+    if (! readAll (stream, tag, 4) || std::memcmp (tag, bankTag, 4) != 0 || ! readAll (stream, sizes, sizeof (sizes)) || sizes[0] > 4096
+        || sizes[1] > 256)
+        return false;
+    struct Filter { bool used, own; char name[nameLength + 1]; float fields[fieldCount]; };
+    static Filter filters[slotCount + 1]; // main thread only
+    float fields[256];
+    for (uint32_t s = 1; s <= sizes[0]; ++s)
+    {
+        uint8_t head[2 + nameLength];
+        if (! readAll (stream, head, sizeof (head)) || ! readAll (stream, fields, sizes[1] * sizeof (float)))
+            return false;
+        if (s > (uint32_t) slotCount)
+            continue;
+        Filter& f = filters[s];
+        f.used = head[0] != 0, f.own = head[1] != 0;
+        std::memcpy (f.name, head + 2, nameLength), f.name[nameLength] = 0;
+        for (int k = 0; k < fieldCount; ++k)
+            f.fields[k] = k < (int) sizes[1] ? clampParam (fieldInfo (k), fields[k]) : fieldInfo (k).def;
+    }
+    uint32_t seqSizes[2];
+    if (! readAll (stream, tag, 4) || std::memcmp (tag, seqsTag, 4) != 0 || ! readAll (stream, seqSizes, sizeof (seqSizes)) || seqSizes[0] > 4096
+        || seqSizes[1] > 4096)
+        return false;
+    static uint8_t steps[sequenceCount + 1][maxSteps];
+    static int lengths[sequenceCount + 1];
+    static uint8_t seq[1 + 4096];
+    for (uint32_t q = 1; q <= seqSizes[0]; ++q)
+    {
+        if (! readAll (stream, seq, 1 + seqSizes[1]))
+            return false;
+        if (q > (uint32_t) sequenceCount)
+            continue;
+        lengths[q] = std::min<int> ({ seq[0], (int) seqSizes[1], maxSteps });
+        for (int i = 0; i < maxSteps; ++i)
+            steps[q][i] = i < lengths[q] ? seq[1 + (size_t) i] : 0;
+    }
+    Store& bank = p.engine.bank();
+    for (int s = 1; s <= std::min<int> ((int) sizes[0], slotCount); ++s)
+        if (filters[s].used)
+        {
+            for (int k = 0; k < fieldCount; ++k)
+                bank.setField (s, k, filters[s].fields[k]);
+            bank.setName (s, filters[s].own ? filters[s].name : nullptr);
+        }
+        else
+            bank.clearSlot (s);
+    for (int q = 1; q <= std::min<int> ((int) seqSizes[0], sequenceCount); ++q)
+        bank.setSequence (q, steps[q], lengths[q]);
     return true;
 }
 
@@ -240,15 +379,28 @@ bool stateLoad (const clap_plugin* plugin, const clap_istream* stream)
     float loaded[paramCount];
     for (uint32_t i = 0; i < paramCount; ++i)
         loaded[i] = paramTable[i].def;
+    bool sawFilter = false;
+    float oldCube = -1.0f;
     for (uint32_t i = 0; i < header[1]; ++i)
     {
         struct { uint32_t id; float value; } pair {};
         if (! readAll (stream, &pair, sizeof (pair)))
             return false;
+        if (pair.id == ParamId::retiredCube)
+            oldCube = pair.value;
         const int index = paramIndex (pair.id);
         if (index >= 0)
-            loaded[index] = clampParam (paramTable[index], pair.value);
+            loaded[index] = clampParam (paramTable[index], pair.value), sawFilter |= pair.id == ParamId::filter;
     }
+    if (! sawFilter && oldCube >= 0.0f) // 0.1.0's Cube: the factory's filter for it, F01..F16
+        loaded[paramIndex (ParamId::filter)] = clampParam (paramTable[paramIndex (ParamId::filter)], std::round (oldCube) + 1.0f);
+    if (header[0] >= 2)
+    {
+        if (! loadBank (p, stream))
+            return false;
+    }
+    else
+        p.engine.bank().factory();
     setAll (p, loaded);
     p.settle.store (true, std::memory_order_release);
     return true;
@@ -310,6 +462,8 @@ bool pluginInit (const clap_plugin* plugin)
         p.applied[i] = paramTable[i].def;
         p.engine.set (paramTable[i].id, paramTable[i].def);
     }
+    showFilter (p, editSlot (p), true); // not processing yet: this thread is the only one
+    p.outgoing.store (0, std::memory_order_relaxed); // nothing to tell: the host reads the values as they are
     p.hostParams = static_cast<const clap_host_params*> (p.host->get_extension (p.host, CLAP_EXT_PARAMS));
     p.hostScreen = static_cast<const clap_host_melodee_screen*> (p.host->get_extension (p.host, CLAP_EXT_MELODEE_SCREEN_HOST));
     return true;
@@ -379,6 +533,12 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         }
     if (p.settle.exchange (false, std::memory_order_acq_rel))
         p.engine.settle();
+    // The page's triggers and wheel (the sequencer's Inc, Dec, Reset; stepping through a sequence's filters).
+    for (int k = 0; k < 3; ++k)
+        if (const uint32_t n = p.commands.trig[k].exchange (0, std::memory_order_acq_rel))
+            p.engine.trigger (k, n);
+    if (const int n = p.commands.browse.exchange (0, std::memory_order_acq_rel))
+        p.engine.browse (n);
 
     // Events at the block's first frame come first, the transport after them.
     const auto* in = process->in_events;
@@ -396,6 +556,18 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     }
     else
         p.engine.transport (false, false, 0.0, 120.0);
+
+    // The page's input and output meters, only while it is being painted: the loudest sample of each side.
+    const bool metering = p.feed.blocks.load (std::memory_order_relaxed) < p.meterUntil.load (std::memory_order_relaxed);
+    auto peak = [frames] (const float* x) {
+        float m = 0.0f;
+        for (uint32_t i = 0; x != nullptr && i < frames; ++i)
+            m = std::max (m, std::fabs (x[i]));
+        return m;
+    };
+    float meters[6] = {};
+    if (metering) // before the sound: the output may be the input's buffers
+        meters[0] = peak (inL), meters[1] = peak (inR != nullptr ? inR : inL);
 
     uint32_t done = 0;
     while (done < frames)
@@ -427,6 +599,24 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     p.feed.split.store (p.engine.split(), std::memory_order_relaxed);
     p.feed.env.store (p.engine.envelope(), std::memory_order_relaxed);
     p.feed.lfo.store (p.engine.lfoPlace(), std::memory_order_relaxed);
+    const Sequencer& seq = p.engine.sequencer();
+    p.feed.slot.store (p.engine.slotNow(), std::memory_order_relaxed);
+    p.feed.sequence.store (p.engine.sequencing() ? seq.sequence : 0, std::memory_order_relaxed);
+    p.feed.step.store (seq.pos, std::memory_order_relaxed);
+    p.feed.mode.store ((int) seq.mode, std::memory_order_relaxed);
+    p.feed.fade.store (seq.fade, std::memory_order_relaxed);
+    p.feed.triggers.store (p.engine.triggerCount(), std::memory_order_relaxed);
+    p.feed.drives.store (p.engine.transformDrives(), std::memory_order_relaxed);
+    for (int a = 0; a < 3; ++a)
+        p.feed.control[a].store (p.engine.control (a), std::memory_order_relaxed);
+    p.engine.takeBend (meters + 2);
+    if (metering)
+    {
+        meters[4] = peak (left), meters[5] = peak (right != nullptr ? right : left);
+        for (int m = 0; m < 6; ++m) // the loudest since the page last looked (it takes them as it paints)
+            if (meters[m] > p.feed.meters[m].load (std::memory_order_relaxed))
+                p.feed.meters[m].store (meters[m], std::memory_order_relaxed);
+    }
     p.feed.blocks.fetch_add (1, std::memory_order_release);
     if (p.hostScreen != nullptr)
     {
@@ -470,6 +660,7 @@ bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
             p.hostScreen->request_paint (p.host);
         return false;
     }
+    p.meterUntil.store (p.feed.blocks.load (std::memory_order_relaxed) + 400, std::memory_order_relaxed);
     p.screen.update (h.nowMs);
     const bool drew = p.screen.paint (h, c->pixels, (int) c->stride, c->whole);
     p.screen.drew (h.nowMs);
@@ -484,15 +675,22 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* e)
         return false;
     auto& p = of (plugin);
     hdui::Edits edits;
+    const uint32_t commandsBefore = p.commands.count();
     const bool used = p.screen.input ((hdui::Key) e->kind, e->value, e->shift, edits);
     bool changed = false;
     for (int i = 0; i < edits.count; ++i)
     {
         const auto& edit = edits.list[i];
         const int index = paramIndex (edit.id);
-        if (index < 0 || edit.press)
+        if (index < 0)
             continue;
-        p.values[index].store (clampParam (paramTable[index], edit.value), std::memory_order_relaxed);
+        if (edit.press) // the sequencer's Inc, Dec and Reset, pressed on the page
+        {
+            if (edit.id >= ParamId::trigInc && edit.id <= ParamId::trigReset)
+                p.commands.press ((int) (edit.id - ParamId::trigInc));
+            continue;
+        }
+        setValue (p, index, edit.value, false);
         p.outgoing.fetch_or (1ull << index, std::memory_order_release);
         p.mainChanged.store (true, std::memory_order_release);
         changed = true;
@@ -502,6 +700,9 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* e)
             p.engine.set (paramTable[i].id, p.values[i].load (std::memory_order_relaxed));
     if (changed && p.hostParams != nullptr && p.hostParams->request_flush != nullptr)
         p.hostParams->request_flush (p.host);
+    // A trigger or the wheel through a sequence: the sound must run a block to take it, even asleep.
+    if (p.commands.count() != commandsBefore && p.host->request_process != nullptr)
+        p.host->request_process (p.host);
     if (used)
     {
         p.paintAsked.store (true, std::memory_order_release);

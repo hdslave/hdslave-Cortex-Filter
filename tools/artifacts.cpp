@@ -46,12 +46,12 @@ int main()
 {
     using namespace ParamId;
     const Case cases[] = {
-        { "LFO 5 Hz sweeping Freq end to end, resonant", { { cube, 0 }, { morph, 0.3f }, { transform, 1.0f }, { emphasis, 0.5f }, { lfoRate, lfoKnob (5.0f) }, { lfoFreq, 1.0f } } },
-        { "LFO 20 Hz on Freq, half depth, resonant", { { cube, 0 }, { morph, 0.3f }, { transform, 1.0f }, { lfoRate, 1.0f }, { lfoFreq, 0.5f } } },
-        { "LFO 3 Hz across vowels (Morph, Transform)", { { cube, 2 }, { lfoRate, lfoKnob (3.0f) }, { lfoMorph, 1.0f }, { lfoTransform, 1.0f } } },
-        { "LFO 1 Hz through Bell Tower's ringing peaks", { { cube, 7 }, { transform, 1.0f }, { lfoRate, lfoKnob (1.0f) }, { lfoMorph, 1.0f }, { lfoFreq, 0.4f } } },
-        { "envelope (0.1 ms attack) on Freq, gated tone", { { cube, 9 }, { envFreq, 1.0f }, { envAttack, 0.0f }, { envRelease, 0.2f } }, true },
-        { "standing still (the floor)", { { cube, 0 }, { morph, 0.3f }, { transform, 1.0f } } },
+        { "LFO 5 Hz sweeping Freq end to end, resonant", { { filter, 1 }, { morph, 0.3f }, { transform, 1.0f }, { emphasis, 0.5f }, { lfoRate, lfoKnob (5.0f) }, { lfoFreq, 1.0f } } },
+        { "LFO 20 Hz on Freq, half depth, resonant", { { filter, 1 }, { morph, 0.3f }, { transform, 1.0f }, { lfoRate, 1.0f }, { lfoFreq, 0.5f } } },
+        { "LFO 3 Hz across vowels (Morph, Transform)", { { filter, 3 }, { lfoRate, lfoKnob (3.0f) }, { lfoMorph, 1.0f }, { lfoTransform, 1.0f } } },
+        { "LFO 1 Hz through Bell Tower's ringing peaks", { { filter, 8 }, { transform, 1.0f }, { lfoRate, lfoKnob (1.0f) }, { lfoMorph, 1.0f }, { lfoFreq, 0.4f } } },
+        { "envelope (0.1 ms attack) on Freq, gated tone", { { filter, 10 }, { envFreq, 1.0f }, { envAttack, 0.0f }, { envRelease, 0.2f } }, true },
+        { "standing still (the floor)", { { filter, 1 }, { morph, 0.3f }, { transform, 1.0f } } },
     };
     for (const Case& c : cases)
     {

@@ -26,11 +26,11 @@ struct Position
 };
 
 // A cube as the filter reads it: each band's settings at the eight corners, on the scales they blend on.
-enum Field { logHz, logQ, dryMix, lpMix, bpMix, hpMix, bellDb, fieldCount };
+enum Field { logHz, logQ, dryMix, lpMix, bpMix, hpMix, bellDb, blendFieldCount };
 struct CubeTable
 {
     int bands = 0; // bands some corner uses; the rest pass everything everywhere and are skipped
-    float band[maxBands][fieldCount][8] {};
+    float band[maxBands][blendFieldCount][8] {};
     bool bell[maxBands] {}; // some corner has a bell on the band
     float gainDb[8] {}, dry[8] {};
 };
