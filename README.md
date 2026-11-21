@@ -271,7 +271,8 @@ a 0.1 ms envelope attack, both crossing octaves in milliseconds) add a few dB to
 
 A frame of the CUBE page takes about 560,000 instructions (about 0.31 ms) on Melodee's screen thread in TIME view,
 about 660,000 in MORPH view while the point moves (its landscape follows a few slices a frame), at most about 30
-frames a second while it moves and none while nothing does.
+frames a second while it moves. While nothing else moves, only the title is drawn again: a frame every 60 ms, about
+18,300 instructions each (about 0.02 % of a core), and none while the page is out of view.
 
 ## Build and test
 
