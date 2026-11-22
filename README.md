@@ -334,7 +334,7 @@ on the MPC.
 
 ## Install
 
-Copy `build/CortexFilter.clap` to `Melodee/Plugins/hdslave Cortex Filter/hdslave Cortex Filter.clap` on the card, then
+Copy `build/CortexFilter.clap` to `Melodee/Plugins/hdslave/hdslave Cortex Filter.clap` on the card, then
 add it to a track's effects. It needs only libc and libm, glibc 2.35 or newer (the MPC has 2.39).
 
 ## Credits
