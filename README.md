@@ -1,22 +1,14 @@
-# Cortex Filter
+# hdslave Cortex Filter
 
-A stereo 3D morphing filter as a CLAP effect, built for the Akai MPC Sample running Melodee (64-bit ARM Linux,
-Cortex-A55). Hosts list it as **hdslave Cortex Filter** (id `com.hdslave.cortex-filter`). It works in the style of
-the "filter cube" morphing filters (E-mu's Z-plane filters, and Rossum Electro-Music's Morpheus module, which put them
-in 3D with a screen that shows where you are in the cube): eight complex filters sit at the corners of a cube, and
-three knobs pick a point inside it. The cubes here are original designs; no filter data or names are taken from those
-instruments.
+**A stereo 3D Z-plane morphing filter cube and filter sequencer as a CLAP effect for the Akai MPC Sample.**
 
-Since 0.2.0 it follows the module's whole way of working, rebuilt for the MPC: what you play through is a **filter**,
-a cube with settings of its own (where the knobs' middle sits on each axis and how far they reach, fades out and in,
-a level and a distortion for each side, Transform turned over to the distortion), kept in a bank of 64. A **filter
-sequencer** steps through lists of filters and commands (Pause, Halt, Bumper, Fade Time Scale) on Inc, Dec and Reset
-triggers: the module's trigger jacks become clocks on the song's grid, the envelope follower, three gate parameters and
-the page. The factory's filters and sequences are original too.
+![Cortex Filter 3D morphing cube and waterfall screen running in hdslaveOS](docs/cortex-filter-screen.gif)
 
-In hdslaveOS it draws its own page on the MPC's screen: the cube in 3D with the filter's point moving through it, the
-filter's response as a 3D waterfall, the module's readouts (the axes' control sums, input, distortion and output meters,
-the sequence's place) and pages to edit filters and program sequences (see [The screen](#the-screen)).
+Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melodee-sample) / [hdslaveOS](https://github.com/hdslave/hdslaveOS) (64-bit ARM Linux, Cortex-A55). Hosts list it as **hdslave Cortex Filter** (id `com.hdslave.cortex-filter`). Inspired by classic "filter cube" morphing filters (E-mu's Z-plane filters and Rossum Electro-Music's Morpheus module), eight complex filters sit at the corners of a 3D cube while **Morph (X)**, **Freq (Y)**, and **Transform (Z)** smoothly navigate anywhere inside it. All cubes, filters, and factory sequences are original designs.
+
+Since 0.2.0 it brings the full module workflow to the MPC: each **filter** in the 64-filter bank stores its own cube, axis offsets and ranges, fade-in/out times, per-side levels, and distortion (with Transform routable to distortion). A built-in **filter sequencer** steps through filter lists and commands (Pause, Halt, Bumper, Fade Time Scale) triggered by host clock divisions, the envelope follower, gate parameters, or the screen.
+
+Under **hdslaveOS**, Cortex Filter renders a live rotating 3D cube, a 3D frequency-response waterfall, axis/level meters, and dedicated filter-editing and sequence-programming pages (see [The screen](#the-screen)).
 
 ## Signal flow
 
