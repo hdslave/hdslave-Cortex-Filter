@@ -189,6 +189,7 @@ inline constexpr auto spans = [] {
 }();
 
 constexpr int frameAt (uint64_t nowMs) { return (nowMs / 60) % 64; }
+constexpr int restFrame = 0; // the frame the title rests on while nothing on the page moves
 
 inline void drawMotion (Ink* dst, int stride, int frame)
 {

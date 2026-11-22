@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 
 namespace cortex
 {
@@ -46,16 +47,58 @@ struct Feed
     std::atomic<uint32_t> blocks { 0 };
 };
 
-// What the page asks of the sound: Inc, Dec and Reset pressed, and the wheel through a sequence's filters, taken at
-// the next block.
+// What the page asks of the sound: Inc, Dec and Reset pressed, and the wheel through a sequence's filters. Each is
+// stamped (the steady clock's milliseconds) when the page gives it, and the audio thread takes those given since its
+// last block at its next one, dropping any given more than keepMs before: a press made while the sound was not
+// running is not fired later. A ring that only the page's thread writes and only the audio thread reads and clears
+// (on stop and reset; on deactivate too, when nothing is processing).
 struct Commands
 {
-    std::atomic<uint32_t> trig[3] {};
-    std::atomic<int> browse { 0 };
-    std::atomic<uint32_t> given { 0 };
-    void press (int which) { trig[which].fetch_add (1, std::memory_order_release), given.fetch_add (1, std::memory_order_relaxed); }
-    void wheel (int steps) { browse.fetch_add (steps, std::memory_order_release), given.fetch_add (1, std::memory_order_relaxed); }
-    uint32_t count() const { return given.load (std::memory_order_relaxed); }
+    static constexpr int wheelKind = 3; // kinds 0-2 are Inc, Dec and Reset
+    static constexpr int64_t keepMs = 500;
+    static int64_t nowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    void press (int which) { put (which, 1); }
+    void wheel (int steps) { put (wheelKind, steps); }
+    uint32_t count() const { return given.load (std::memory_order_relaxed); } // every one the page gave
+    // The audio thread's: whether any wait; each still fresh to `use` (kind, amount) in the order given, the rest
+    // dropped.
+    bool waiting() const { return head.load (std::memory_order_relaxed) != tail.load (std::memory_order_acquire); }
+    template <typename Use>
+    void take (int64_t now, Use&& use)
+    {
+        const uint32_t end = tail.load (std::memory_order_acquire);
+        for (uint32_t at = head.load (std::memory_order_relaxed); at != end; ++at)
+        {
+            const Command& c = ring[at % size];
+            if (now - c.ms <= keepMs)
+                use (c.kind, c.amount);
+        }
+        head.store (end, std::memory_order_release);
+    }
+    void clear() { head.store (tail.load (std::memory_order_acquire), std::memory_order_release); }
+
+private:
+    struct Command
+    {
+        int kind, amount;
+        int64_t ms;
+    };
+    static constexpr uint32_t size = 64;
+    Command ring[size] {};
+    std::atomic<uint32_t> head { 0 }, tail { 0 }, given { 0 };
+    void put (int kind, int amount)
+    {
+        given.fetch_add (1, std::memory_order_relaxed);
+        const uint32_t at = tail.load (std::memory_order_relaxed);
+        if (at - head.load (std::memory_order_acquire) >= size)
+            return; // full: the sound has taken none of the last 64 (it is not running); this one is dropped
+        ring[at % size] = { kind, amount, nowMs() };
+        tail.store (at + 1, std::memory_order_release);
+    }
 };
 
 // The cube in perspective: a point of it (each axis 0..1) on the screen, and its depth (larger is farther).
@@ -125,14 +168,21 @@ public:
                || ! std::equal (h.pot, h.pot + 3, lastHost.pot) || ! std::equal (h.engaged, h.engaged + 3, lastHost.engaged);
     }
 
-    bool bodyAtRest (const hdui::Host& h) const
-    {
-        return feed.blocks.load (std::memory_order_acquire) == seenBlocks && ! animating (h);
-    }
+    bool bodyAtRest (const hdui::Host& h) const { return ! newBlocks() && ! animating (h); }
+    // The sound ran a block the page has not shown yet.
+    bool newBlocks() const { return feed.blocks.load (std::memory_order_acquire) != seenBlocks; }
+
+    // The page is awake for awakeMs from the last time it was woken (it opened, an input, a value or a knob changed,
+    // sound ran; cortex.cpp). The title moves while it is awake or anything else moves (the graphs, the song playing;
+    // the LFO and the sequencer move only while sound runs); otherwise the title rests on its rest frame and the page
+    // asks for no paints, to save the battery.
+    void wake (uint64_t nowMs) { awakeUntilMs = nowMs + awakeMs; }
+    bool moving (const hdui::Host& h) const { return animating (h) || h.playing || h.nowMs < awakeUntilMs; }
+    int titleFrame (const hdui::Host& h) const { return moving (h) ? wordmark::frameAt (h.nowMs) : wordmark::restFrame; }
 
     bool paintTitleOnly (const hdui::Host& h, uint32_t* pixels, int stride)
     {
-        const int frame = wordmark::frameAt (h.nowMs);
+        const int frame = titleFrame (h);
         if (frame == lastTitleFrame)
             return false;
         wordmark::drawMotion (pixels, stride, frame);
@@ -215,7 +265,7 @@ public:
     void drew (const hdui::Host& h)
     {
         lastHost = h;
-        lastTitleFrame = wordmark::frameAt (h.nowMs);
+        lastTitleFrame = titleFrame (h);
     }
 
     bool morphView() const { return viewMorph; }
@@ -237,7 +287,7 @@ protected:
     {
         for (int y = 0; y < wordmark::height; ++y)
             std::copy_n (wordmark::fixed.data() + y * wordmark::width, wordmark::width, r.px + y * r.stride);
-        wordmark::drawMotion (r.px, r.stride, wordmark::frameAt (h.nowMs));
+        wordmark::drawMotion (r.px, r.stride, titleFrame (h));
     }
     bool tallCustom() const override { return true; }
     bool customEditing() const override { return groupIndex() == seqGroup && editingStep; }
@@ -415,7 +465,7 @@ private:
     Commands& commands;
 
     static constexpr int cols = 112, slices = 18, trailLength = 24;
-    static constexpr uint64_t frameMs = 33, sliceMs = 40, liveMs = 400, flashMs = 150;
+    static constexpr uint64_t frameMs = 33, sliceMs = 40, liveMs = 400, flashMs = 150, awakeMs = 4000;
     static constexpr float sliceDx = 2.4f, sliceDy = -3.8f, dbLow = -36.0f, dbHigh = 18.0f, sliceHeight = 64.0f;
     static constexpr hdui::Ink magenta = 0xffd040ff, deep = 0xff22183f, grid = 0xff101828, path = 0xff6a2c8c, edgeNear = 0xff8fb6e8,
                                edgeFar = 0xff27324f, white = 0xfff4f8ff, yellow = 0xffffd23e, green = 0xff3ee07a, red = 0xffff4a4a;
@@ -434,7 +484,7 @@ private:
     uint32_t seenBlocks = 0, seenTriggers = 0;
     hdui::Host lastHost {};
     int lastTitleFrame = -1;
-    uint64_t lastBlockMs = 0, lastUpdateMs = 0, lastSliceMs = 0, swayMs = 0, flashUntilMs = 0;
+    uint64_t lastBlockMs = 0, lastUpdateMs = 0, lastSliceMs = 0, swayMs = 0, flashUntilMs = 0, awakeUntilMs = 0;
     float rate = 48000.0f;
     int slotNow = 1, shownCube = -2;
     float shownEmphasis = 0.0f, shownRate = 0.0f, shownLevel = 0.0f;

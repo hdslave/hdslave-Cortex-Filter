@@ -15,6 +15,7 @@
 #include <clap/clap.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +25,7 @@
 #include <map>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -707,6 +709,98 @@ void testExtremes()
     }
 }
 
+// The largest difference between two renders.
+float maxDifference (const Stereo& a, const Stereo& b, size_t from = 0)
+{
+    float m = 0.0f;
+    for (size_t i = from; i < a.l.size() && i < b.l.size(); ++i)
+        m = std::max ({ m, std::fabs (a.l[i] - b.l[i]), std::fabs (a.r[i] - b.r[i]) });
+    return m;
+}
+
+Stereo slice (const Stereo& x, size_t from, size_t frames)
+{
+    Stereo s;
+    s.l.assign (x.l.begin() + (long) from, x.l.begin() + (long) (from + frames));
+    s.r.assign (x.r.begin() + (long) from, x.r.begin() + (long) (from + frames));
+    return s;
+}
+
+// The sequencer through a gap in the process calls while the song plays on, as Melodee's idle gate makes one (it lets
+// an effect sleep after half a second of silence): Vowel Walk on a phrase with a bar's rest across its Reset sounds
+// after the rest as it does with the rest played through. A loop one Reset long (the song back at the bar's start
+// each time round) starts the sequence again each time: every pass sounds as the one before.
+void testSequencerGaps()
+{
+    const Stereo phrase = loop (48000.0, 9.0);
+    {
+        Instance through, gapped;
+        for (Instance* a : { &through, &gapped })
+        {
+            CHECK (a->loadPreset ("vowel-walk"));
+            a->run (slice (phrase, 0, 144000), 128); // beats 0-6
+        }
+        through.run (Stereo { std::vector<float> (96000, 0.0f), std::vector<float> (96000, 0.0f) }, 128); // the rest, beats 6-10
+        gapped.played += 96000; // the rest asleep: no process calls
+        const Stereo a = through.run (slice (phrase, 240000, 192000), 128), b = gapped.run (slice (phrase, 240000, 192000), 128);
+        const float apart = maxDifference (a, b, 48000); // from beat 11, past the first change after the rest
+        if (apart >= 1e-3f)
+            std::printf ("  after a rest asleep: %g from the rest played through\n", (double) apart);
+        CHECK (apart < 1e-3f);
+    }
+    {
+        Instance a;
+        a.setup ({ { "Sequence", 1 }, { "Inc Clock", 7 }, { "Reset Clock", 1 } }, 0.3);
+        const Stereo bar = slice (phrase, 0, 96000);
+        std::vector<Stereo> passes;
+        for (int pass = 0; pass < 4; ++pass)
+        {
+            a.played = 0;
+            passes.push_back (a.run (bar, 128));
+        }
+        for (int pass = 2; pass < 4; ++pass) // (the first came in from the silence before it, with no change of filter)
+        {
+            const float apart = maxDifference (passes[pass], passes[pass - 1]);
+            if (apart >= 1e-3f)
+                std::printf ("  a loop one Reset long: pass %d is %g from the one before\n", pass + 1, (double) apart);
+            CHECK (apart < 1e-3f);
+        }
+    }
+}
+
+// The page's presses fire at the next block only while fresh: one the sound did not take within half a second (it
+// was not running) is dropped, and stopping, resetting or deactivating the plug-in drops those not yet taken.
+void testPagePresses()
+{
+    const Stereo x = loop (48000.0, 1.0);
+    // Sequence 1 and no clocks: only a press moves it. `before` runs between the press (if any) and the render, which
+    // has the song stopped (so a reset's or an activation's restart of the song does not drop a press itself).
+    auto render = [&] (bool pressed, const std::function<void (Instance&)>& before) {
+        Instance a;
+        a.setup ({ { "Sequence", 1 }, { "Inc Clock", 0 } }, 0.3);
+        const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+        auto in = [&] (uint32_t kind, int value) { melodee_screen_input_t e { kind, value, false }; return screen->input (a.plugin, &e); };
+        CHECK (in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_WHEEL, 6)); // TRIG, INC
+        if (pressed)
+            CHECK (in (MELODEE_SCREEN_PUSH, 0));
+        if (before)
+            before (a);
+        return a.run (x, 128, {}, 2, nullptr, false);
+    };
+    auto restart = [] (Instance& a) { a.plugin->stop_processing (a.plugin), a.plugin->start_processing (a.plugin); };
+    auto reset = [] (Instance& a) { a.plugin->reset (a.plugin); };
+    auto reactivate = [] (Instance& a) {
+        a.plugin->stop_processing (a.plugin), a.plugin->deactivate (a.plugin);
+        CHECK (a.plugin->activate (a.plugin, 48000.0, 1, 4096) && a.plugin->start_processing (a.plugin));
+    };
+    const Stereo quiet = render (false, nullptr);
+    CHECK (maxDifference (render (true, nullptr), quiet) > 0.01f); // fresh: the sequence steps on
+    CHECK (maxDifference (render (true, [] (Instance&) { std::this_thread::sleep_for (std::chrono::milliseconds (600)); }), quiet) == 0.0f);
+    CHECK (maxDifference (render (true, restart), render (false, restart)) == 0.0f);
+    CHECK (maxDifference (render (true, reset), render (false, reset)) == 0.0f);
+    CHECK (maxDifference (render (true, reactivate), render (false, reactivate)) == 0.0f);
+}
+
 // The presets through the loop, to listen to: demo-dry.wav is the loop itself.
 void demos (const std::string& folder)
 {
@@ -741,8 +835,9 @@ void demos (const std::string& folder)
     writeWav ((folder + "/demo-every-cube.wav").c_str(), all.l, all.r, 48000);
 }
 
-// Melodee's screen: the page draws, follows the sound while it plays and the knobs while it does not, animates
-// the title while the sound sleeps, answers the wheel (filters), Push (views) and Minus / Plus (groups), edits, copies and
+// Melodee's screen: the page draws, follows the sound while it plays and the knobs while it does not, moves its title
+// for 4 s after it opens, an input or the sound stopping and then rests it, asking for no paints, answers the wheel
+// (filters), Push (views) and Minus / Plus (groups), edits, copies and
 // restores filters, programs a sequence, fires the sequencer's triggers, names K1-K3, and tells the host what it
 // changed. Its pictures go to OUT_FOLDER/screen-*.png.
 void testScreen (const std::string& folder)
@@ -795,12 +890,14 @@ void testScreen (const std::string& folder)
         }
     };
 
-    // Both the planet and the lettering move while the effect sleeps. The lower word stays still and the loop closes.
+    // For 4 s after the page opens the title moves while the effect sleeps, each paint asking for the next: both the
+    // planet and the lettering, the lower word still, and the loop closes. Nothing asks the sound to run.
     CHECK (paint (true));
     const auto first = pixels, still = outsideTitleMotion();
     const int asleepRequests = processes;
+    int requests = paints;
     now += 20;
-    CHECK (! paint());
+    CHECK (! paint() && paints > requests);
     now += 40;
     CHECK (paint() && outsideTitleMotion() == still);
     auto titleChanged = [&] (int left, int right, int top, int bottom) {
@@ -816,10 +913,29 @@ void testScreen (const std::string& folder)
     CHECK (! titleChanged (140, 184, 12, 22) && ! titleChanged (164, 184, 0, 26));
     now += 3780;
     CHECK (paint() && pixels == first && processes == asleepRequests);
+    // Then it rests on its rest frame, and no paint is asked for until something wakes it: an input (even one with
+    // nothing to do, Minus on the first group), a whole paint (the page back in view), the host's Shift.
+    now += 200;
+    requests = paints;
+    CHECK (paint() && paints == requests && outsideTitleMotion() == still);
+    const auto resting = pixels;
+    now += 1000;
+    CHECK (! paint() && paints == requests && pixels == resting);
+    CHECK (! in (MELODEE_SCREEN_NUDGE, -1) && paints > requests);
+    now += 60;
+    CHECK (paint() && pixels != resting && outsideTitleMotion() == still);
+    now += 4100;
+    CHECK (paint() && pixels == resting);
+    requests = paints;
+    now += 60;
+    CHECK (! paint() && paints == requests);
+    CHECK (paint (true) && paints > requests && pixels != resting);
+    now += 60;
+    CHECK (paint() && pixels != resting && processes == asleepRequests);
     canvas.shift = true;
     CHECK (paint() && outsideTitleMotion() != still);
     canvas.shift = false;
-    CHECK (paint() && pixels == first);
+    CHECK (paint() && outsideTitleMotion() == still);
     // CUBE: K1-K3 are Morph, Freq, Transform; the wheel loads the next filter in use (and tells the host, with the
     // edit filter's fields that now show it).
     CHECK ((knobs() == std::vector<clap_id> { a.id ("Morph"), a.id ("Freq"), a.id ("Transform") }));
@@ -882,6 +998,12 @@ void testScreen (const std::string& folder)
     const auto quiet = outsideTitleMotion();
     now += 60;
     CHECK (paint() && paints > quietPaints && outsideTitleMotion() == quiet);
+    // 4 s after the sound stopped the title rests, and the page asks for no more paints.
+    now += 4000;
+    paint();
+    const int restingPaints = paints;
+    now += 60;
+    CHECK (! paint() && paints == restingPaints && outsideTitleMotion() == quiet);
 
     // FILTER: Plus moves to the next group; K1-K3 follow the cursor; Push edits the filter Filter picks (F01 here).
     CHECK (in (MELODEE_SCREEN_NUDGE, 1));
@@ -1011,6 +1133,8 @@ int main (int argc, char** argv)
     testBlockSizes();
     testRouting();
     testExtremes();
+    testSequencerGaps();
+    testPagePresses();
     demos (folder);
     testScreen (folder);
     entry->deinit();

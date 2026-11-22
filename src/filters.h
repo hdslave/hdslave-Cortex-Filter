@@ -376,28 +376,29 @@ struct Sequencer
         enter (s);
     }
     // The wheel: to the `n`th filter step on (back for n < 0), round the sequence, past the commands without
-    // their taking effect (as the module's encoder does).
+    // their taking effect (as the module's encoder does). The length is read once: the page may take out the last
+    // step meanwhile.
     void browse (const Store& s, int n)
     {
-        if (! on (s) || n == 0)
+        const int length = s.length (sequence); // 0 for no sequence
+        if (length <= 0 || n == 0)
             return;
-        const int length = s.length (sequence);
         pos = std::min (pos, length - 1);
         int at = pos;
         for (int k = 0, left = std::abs (n); k < length && left > 0; ++k)
         {
             at = (at + (n > 0 ? 1 : -1) + length) % length;
-            if (isFilterStep (s.step (sequence, at)))
-                --left, pos = at, filter = s.step (sequence, at);
+            if (const int code = s.step (sequence, at); isFilterStep (code))
+                --left, pos = at, filter = code;
         }
     }
 
 private:
     void move (const Store& s, int by)
     {
-        if (! on (s) || mode != Mode::normal)
+        const int length = s.length (sequence); // read once, as in browse()
+        if (length <= 0 || mode != Mode::normal)
             return;
-        const int length = s.length (sequence);
         pos = std::min (pos, length - 1);
         const int next = (pos + by + length) % length;
         if (s.step (sequence, next) == stepBumper)

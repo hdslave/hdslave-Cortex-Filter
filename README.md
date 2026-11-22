@@ -95,8 +95,8 @@ puts back the factory's filter, or empties one of yours.
 | Control | Range | What it does |
 |---|---|---|
 | Sequence | Off, 16 sequences | The sequence that picks the filter. Loading one (or starting the song) starts it at its first step |
-| Inc Clock, Dec Clock | Off, 8 Bars … 1/32 (with triplets) | An Inc (or Dec) each time the playing song crosses that grid: on the beat, the same steps for the same part of the song. A jump or a loop into another cell of the grid counts too |
-| Reset Clock | Off, 1 – 16 bars | A Reset on that grid. Inc and Dec on the same beat come first, so a sequence reset on the bar starts the bar on its first step |
+| Inc Clock, Dec Clock | Off, 8 Bars … 1/32 (with triplets) | An Inc (or Dec) each time the playing song crosses that grid: on the beat, the same steps for the same part of the song. After a gap (Melodee lets the effect sleep through a rest while the song plays on) or a jump forward it catches up, in order, so the sequence is where it would be had it played through; a jump back (a loop) fires it when the song lands on the grid |
+| Reset Clock | Off, 1 – 16 bars | A Reset on that grid. Inc and Dec on the same beat come first, so a sequence reset on the bar starts the bar on its first step. It catches up after a gap as Inc and Dec do, and a loop that starts on its grid resets each time round |
 | Env Trigger | Off, Inc, Dec, Reset | The envelope follower as a trigger: each time it rises through Trig Level, that input fires; it fires again once it has fallen 6 dB under it |
 | Trig Level | −48 – 0 dB | |
 | Inc, Dec, Reset | Low, High | Gates: each rise from Low to High fires (automation or another host's lanes); Push on the page fires them too |
@@ -230,14 +230,16 @@ parameter list. In stock Melodee or another host, the parameters are listed as u
   adds the filter Filter picks, and **Restore** (pushed twice) puts the factory's sequence back. K1-K3 turn Sequence,
   Inc Clock and Reset Clock.
 - **TRIG**: the sequencer's clocks and triggers, with the sequence's steps beside them as squares. Push on Inc, Dec or
-  Reset fires it (and asks Melodee to run the sound, so a sleeping effect takes it).
+  Reset fires it (and asks Melodee to run the sound, so a sleeping effect takes it); a press the sound has not taken
+  within half a second is dropped, not fired later.
 - **KNOBS, LFO, ENV, OUT**: the controls, the cube small beside them with the response under it.
 
 The header names the filter heard and the sequence's place (its step, or −P− and −H−, and a Fade scale other than x1),
 lit yellow for a moment by each trigger. While no sound runs Melodee lets the effect sleep:
 the cube and meters settle, and the page shows where the knobs put the point. The CORTEX lettering ripples one pixel
 to either side on a 3.84-second loop. The O holds a clockwise spiral planet with a glint traveling around its ring. Both
-animations share a screen-thread tick while the effect is idle. Changes made
+move while anything else on the page does or the song plays, and for 4 seconds after the page opens, an input, a knob
+or the sound stopping; then the title rests and the page asks Melodee for no paints until something changes. Changes made
 on the page show at once; a K1-K3 turn shows once Melodee passes it to the plug-in. MORPH view's landscape still
 catches up with a change while the sound sleeps.
 
@@ -272,7 +274,8 @@ a 0.1 ms envelope attack, both crossing octaves in milliseconds) add a few dB to
 A frame of the CUBE page takes about 560,000 instructions (about 0.31 ms) on Melodee's screen thread in TIME view,
 about 660,000 in MORPH view while the point moves (its landscape follows a few slices a frame), at most about 30
 frames a second while it moves. While nothing else moves, only the title is drawn again: a frame every 60 ms, about
-18,300 instructions each (about 0.02 % of a core), and none while the page is out of view.
+18,300 instructions each (about 0.02 % of a core), for the 4 seconds it stays awake; then none, and none while the page
+is out of view.
 
 ## Build and test
 
@@ -296,9 +299,11 @@ tools/artifacts.sh  # what the 8-frame control steps add to a tone under a movin
   landscape: whole after a new cube, caught up within four frames of a move), the presets; the sequencer's rules
   (Inc and Dec round the end, Pause, Halt, Bumper, a Bumper or Halt first, Fade, the wheel past commands, steps put in
   and taken out), its clocks on the song's grid (none at the start, Inc before Reset on the same beat, stopped and
-  started again), the gates' rising edges, the envelope as a trigger, the fades' times and their scaling; the filters'
-  settings (Null giving the input to the bit, each side's gain, offsets and gains moving the point, Transform > Dist
-  sounding as the plain filter at its bottom, distortion on one side leaving the other to the bit, bounded on loud
+  started again; after a gap while the song plays on, short or long, across Resets or not, where a run throughout
+  lands; a loop one Reset long resetting each time round; a jump back firing only onto the grid), the gates' rising
+  edges, the envelope as a trigger, the fades' times and their scaling; the filters' settings (Null giving the input
+  to the bit, each side's gain, offsets and gains moving the point, Transform > Dist sounding as the plain filter at
+  its bottom, distortion on one side leaving the other to the bit, bounded on loud
   noise); the factory's bank; and the review's fixes,
   each against its failure: the right side correct after Spread goes to 0 and back across a cube change, an infinite
   and a NaN input sample leaving every output a number and the sound back within a second, Drive leaving 0 dB without
@@ -313,7 +318,10 @@ tools/artifacts.sh  # what the 8-frame control steps add to a tone under a movin
   output to the bit in blocks of 1, 3, 8, 64, 128, 333, 1024 and 4096 frames, the sequencer running (clocks, the
   envelope, a gate, edit filter changes); Mix 0 giving the input back to the bit;
   a mono input, no input, the same buffers in and out; random settings changed every 64 frames on loud noise staying
-  finite and under 2, then ringing down to nothing; and the page (its title loops while the sound sleeps, the graphs
+  finite and under 2, then ringing down to nothing; a sequence after a rest asleep sounding as with the rest played
+  through, and a loop one Reset long sounding the same each pass; the page's presses dropped when stale or after a
+  stop, reset or deactivation; and the page (its title moving for 4 seconds and then resting with no paints asked
+  for, woken by an input or the page opening, the graphs
   follow the sound and the knobs, drawing a new frame every 40 ms of playback, its controls set the values the host hears, the wheel
   loading filters, an edit kept in its filter, Copy and Restore, a step edited on SEQ, Inc pressed on TRIG asking
   for the sound to run, MORPH view catching up by itself while the sound sleeps). It writes the presets through a test loop to

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <numeric>
 
 namespace cortex
 {
@@ -22,6 +23,23 @@ namespace cortex
 #define CORTEX_CONTROL_FRAMES 8 // tools/artifacts.sh builds it at 1 too, to measure what the steps cost
 #endif
 constexpr uint32_t controlFrames = CORTEX_CONTROL_FRAMES; // the point and the filter are worked out this often
+
+// The sequencer's clocks in 1/24ths of a beat: every length is a whole number of them (a 1/32 is 3, a 1/16T 4, 16
+// bars 1536), so the boundaries of two clocks that fall together are found to fall together.
+constexpr int64_t clockTicksPerBeat = 24;
+template <size_t N>
+constexpr bool wholeTicks (const double (&lengths)[N])
+{
+    for (size_t i = 0; i < N; ++i)
+    {
+        const double t = lengths[i] * (double) clockTicksPerBeat, whole = (double) (int64_t) (t + 0.5);
+        if (t - whole > 1e-9 || whole - t > 1e-9)
+            return false;
+    }
+    return true;
+}
+static_assert (wholeTicks (clockBeats) && wholeTicks (resetBeats), "a clock's length in whole ticks");
+inline int64_t floorDiv (int64_t a, int64_t b) { return a / b - (a % b != 0 && (a < 0) != (b < 0) ? 1 : 0); }
 
 // The left and right channels side by side, as one 2-lane vector (a NEON register on the MPC): each band runs both
 // sides at once.
@@ -185,9 +203,9 @@ public:
                     sequenceParam = q, loadPending = true;
                 return;
             }
-            case incClock: clock[0] = clockIndexOf (v, clockBeats), clockKnown[0] = false; return;
-            case decClock: clock[1] = clockIndexOf (v, clockBeats), clockKnown[1] = false; return;
-            case resetClock: clock[2] = clockIndexOf (v, resetBeats), clockKnown[2] = false; return;
+            case incClock: setClock (0, clockIndexOf (v, clockBeats)); return;
+            case decClock: setClock (1, clockIndexOf (v, clockBeats)); return;
+            case resetClock: setClock (2, clockIndexOf (v, resetBeats)); return;
             case envTrigger: envTrigMode = std::clamp ((int) v, 0, 3); return;
             case trigLevel: trigLevelDb = v; return;
             case trigInc: gate (0, v); return;
@@ -338,11 +356,15 @@ private:
     int distCube = -3;
     float controlNow[3] = {};
 
-    // The sequencer's triggers: waiting (Inc, Dec, Reset), the wheel, where each clock's grid was, the envelope's arm.
+    // The sequencer's triggers: waiting (Inc, Dec, Reset), the wheel, each clock's length in ticks and where its grid
+    // was, the song's place then, the envelope's arm.
     uint32_t pending[3] = {}, triggers = 0;
     int pendingBrowse = 0;
-    int64_t clockCell[3] = {};
+    int64_t clockTicks[3] = { clockTicksPerBeat, 0, 0 }, clockCell[3] = {};
+    double clockPlace = 0.0;
     bool clockKnown[3] = {}, envArmed = true;
+    // After a gap, at most this many of the clocks' boundaries are replayed one by one (replay()).
+    static constexpr int64_t maxReplay = 8 * maxSteps;
 
     // The distortion's meter.
     float distPeak[2] = {};
@@ -363,6 +385,12 @@ private:
         envGainLin = std::exp2 (envGainDb * dbToLog2);
         attackCoef = onePole (attackSeconds (attackKnob), 1.0f, rate);
         releaseCoef = onePole (releaseSeconds (releaseKnob), 1.0f, rate);
+    }
+
+    void setClock (int c, int index)
+    {
+        clock[c] = index, clockKnown[c] = false;
+        clockTicks[c] = std::llround ((c < 2 ? clockBeats[index] : resetBeats[index]) * (double) clockTicksPerBeat);
     }
 
     void gate (int which, float v)
@@ -400,10 +428,9 @@ private:
         return 1.0f / (seconds * rate);
     }
 
-    // The sequencer's control step: a sequence (re)loaded, then each trigger since the last step: the clocks (each
-    // time the song crosses a multiple of their length; a jump into another cell of the grid counts too), the
-    // envelope rising through Trig Level, the gates and the page; Inc first, then Dec, then Reset, so a Reset on the
-    // same beat as an Inc leaves the sequence at its first step.
+    // The sequencer's control step: a sequence (re)loaded, then each trigger since the last step: the clocks
+    // (runClocks()), the envelope rising through Trig Level, the gates and the page; Inc first, then Dec, then Reset,
+    // so a Reset on the same beat as an Inc leaves the sequence at its first step.
     void stepSequence()
     {
         if (loadPending || startPending)
@@ -412,20 +439,11 @@ private:
             return; // off: nothing to move (the clocks are found again when a sequence is loaded)
         uint32_t fire[3] = { pending[0], pending[1], pending[2] };
         pending[0] = pending[1] = pending[2] = 0;
-        const double lengths[3] = { clockBeats[clock[0]], clockBeats[clock[1]], resetBeats[clock[2]] };
         const bool on = seq.on (store);
-        for (int c = 0; c < 3; ++c)
-        {
-            if (! on || ! songPlaying || lengths[c] <= 0.0) // no sequence: nothing to move (found again when one runs)
-            {
-                clockKnown[c] = false;
-                continue;
-            }
-            const int64_t cell = (int64_t) std::floor (songBeatsAt (frame) / lengths[c] + 1e-9);
-            if (clockKnown[c] && cell != clockCell[c])
-                ++fire[c];
-            clockCell[c] = cell, clockKnown[c] = true;
-        }
+        if (on && songPlaying)
+            runClocks (fire);
+        else // no sequence or no song: nothing to move (the clocks are found again when one runs)
+            clockKnown[0] = clockKnown[1] = clockKnown[2] = false;
         if (envTrigMode != 0 && on)
         {
             const float level = (trigLevelDb - envFloorDb) / -envFloorDb, again = std::max (0.0f, level - trigHysteresisDb / -envFloorDb);
@@ -443,6 +461,119 @@ private:
         if (pendingBrowse != 0)
             seq.browse (store, pendingBrowse), pendingBrowse = 0, ++triggers;
         triggers += fire[0] + fire[1] + fire[2];
+    }
+
+    // The clocks at a control step: the boundaries of each one's grid (the multiples of its length) the song passed
+    // since the last step, added to `fire`. Playing on, a step passes one at most (those of different clocks that
+    // fall together, together). After a gap (the host let the sound sleep while the song played on) or a jump
+    // forward it passes many: they are replayed in the order they came, so the sequence is where it would be had it
+    // run throughout. A jump back fires a clock once if the song landed on one of its boundaries (a loop's start).
+    void runClocks (uint32_t fire[3])
+    {
+        const double place = songBeatsAt (frame);
+        const double lengths[3] = { clockBeats[clock[0]], clockBeats[clock[1]], resetBeats[clock[2]] };
+        const bool back = place < clockPlace;
+        clockPlace = place;
+        int64_t from[3] = {}, to[3] = {};
+        for (int c = 0; c < 3; ++c)
+        {
+            if (lengths[c] <= 0.0)
+            {
+                clockKnown[c] = false;
+                continue;
+            }
+            const int64_t cell = (int64_t) std::floor (place / lengths[c] + 1e-9);
+            if (clockKnown[c] && back) // the boundary at or after where it landed (anchorBeats), if it has passed it
+                fire[c] += (double) cell >= anchorBeats / lengths[c] - 1e-9 ? 1u : 0u;
+            else if (clockKnown[c])
+                from[c] = clockCell[c], to[c] = cell;
+            clockCell[c] = cell, clockKnown[c] = true;
+        }
+        if (! back)
+            replay (from, to, fire);
+    }
+
+    // Each clock's boundaries after cell from[c] up to cell to[c], in the order they came (at one they share: Inc,
+    // then Dec, then Reset); the last of them (one boundary, or several together) is left in `fire` with the step's
+    // other triggers. More than maxReplay (a long gap) are cut, so the work stays bounded: first to a Reset boundary
+    // passed (the one before the last if the rest fits, else the last; the Reset there takes the sequence to its
+    // first step), then by whole laps of the Inc and Dec clocks' pattern (`length` repeats of it: the steps skipped
+    // come to whole laps of the sequence). That is exact for one clock alone, and for both on a sequence without
+    // Pauses, Halts or Bumpers; with them the walk ends against them as the whole replay's does once it has settled.
+    // A single lap of more than maxReplay (an Inc of 1/32 with a Dec of bars): only the last maxReplay are replayed.
+    void replay (int64_t from[3], const int64_t to[3], uint32_t fire[3])
+    {
+        const int64_t* ticks = clockTicks;
+        auto count = [&] {
+            int64_t n = 0;
+            for (int c = 0; c < 3; ++c)
+                n += to[c] - from[c];
+            return n;
+        };
+        auto skipTo = [&] (int64_t at, int64_t* into) { // into[] for Inc and Dec: none of their boundaries up to tick `at`
+            for (int c = 0; c < 2; ++c)
+                if (to[c] > from[c])
+                    into[c] = std::min (to[c], std::max (from[c], floorDiv (at, ticks[c])));
+        };
+        if (count() == 0)
+            return; // most steps: no boundary
+        if (count() > maxReplay && to[2] > from[2])
+        {
+            int64_t r = to[2] - 1 > from[2] ? to[2] - 1 : to[2], start[2] = { from[0], from[1] };
+            skipTo (r * ticks[2], start);
+            if (r < to[2] && (to[0] - start[0]) + (to[1] - start[1]) + (to[2] - r + 1) > maxReplay)
+                r = to[2];
+            skipTo (r * ticks[2], from); // the Inc and Dec at the Reset's own boundary come before it: skipped too
+            from[2] = r - 1;
+        }
+        const int length = count() > maxReplay ? store.length (seq.sequence) : 0;
+        const bool incs = to[0] > from[0], decs = to[1] > from[1];
+        if (length > 0 && (incs || decs))
+        {
+            const int64_t span = incs && decs ? ticks[0] / std::gcd (ticks[0], ticks[1]) * ticks[1] : ticks[incs ? 0 : 1];
+            const int64_t lap = span * length, perLap = (incs ? lap / ticks[0] : 0) + (decs ? lap / ticks[1] : 0);
+            if (perLap <= maxReplay)
+            {
+                const int64_t laps = (count() - maxReplay + perLap - 1) / perLap;
+                for (int c = 0; c < 2; ++c)
+                    if (to[c] > from[c])
+                        from[c] = std::min (to[c], from[c] + laps * (lap / ticks[c]));
+            }
+            else
+            {
+                const int64_t end = std::max (incs ? to[0] * ticks[0] : 0, decs ? to[1] * ticks[1] : 0);
+                skipTo (end - maxReplay * ticks[0] * ticks[1] / (ticks[0] + ticks[1]), from); // both clocks: one alone laps sooner
+            }
+        }
+        for (;;)
+        {
+            int64_t at = INT64_MAX;
+            for (int c = 0; c < 3; ++c)
+                if (from[c] < to[c])
+                    at = std::min (at, (from[c] + 1) * ticks[c]);
+            if (at == INT64_MAX)
+                return;
+            bool now[3], last = true;
+            for (int c = 0; c < 3; ++c)
+            {
+                now[c] = from[c] < to[c] && (from[c] + 1) * ticks[c] == at;
+                from[c] += now[c] ? 1 : 0;
+                last &= from[c] == to[c];
+            }
+            if (last)
+            {
+                for (int c = 0; c < 3; ++c)
+                    fire[c] += now[c] ? 1u : 0u;
+                return;
+            }
+            if (now[0])
+                seq.inc (store);
+            if (now[1])
+                seq.dec (store);
+            if (now[2])
+                seq.reset (store);
+            triggers += (now[0] ? 1u : 0u) + (now[1] ? 1u : 0u) + (now[2] ? 1u : 0u);
+        }
     }
 
     // The control step: the sequencer, the LFO, the envelope, the glides, the filter heard and its settings, the

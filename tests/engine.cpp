@@ -818,6 +818,106 @@ void testSequencerEngine()
     }
 }
 
+// The clocks through a gap in the blocks while the song plays on (the host lets the sound sleep after half a second of
+// silence and wakes it when sound comes back): after it the sequence is where it would be had it run throughout, for
+// the presets' clocks and others, gaps short and long, mid-cell or across Resets, past maxReplay boundaries and far
+// past it. A loop one Reset long starts the sequence again each time round; a jump back fires a clock only when it
+// lands on one of its boundaries.
+void testClockGaps()
+{
+    struct Clocks
+    {
+        const char* name;
+        int sequence, inc, dec, reset;
+    };
+    const Clocks list[] = {
+        { "vowel walk", 6, 9, 0, 2 },       { "wander", 8, 7, 8, 0 },          { "acid sequence", 5, 11, 0, 1 },
+        { "bar gate", 7, 9, 0, 1 },         { "a pause", 9, 7, 0, 1 },         { "1/32 and 1/16T", 10, 13, 12, 0 },
+        { "1/32 alone", 10, 13, 0, 0 },     { "1/32, a Bumper, 16 bars", 11, 13, 0, 5 }, { "both, a Pause, 4 bars", 9, 11, 10, 3 },
+    };
+    const uint64_t beat = 24000; // at 120 bpm and 48 kHz
+    const uint64_t gaps[] = { 8 * 3001, beat * 4, beat * 4 + 8 * 1001, beat * 13 + 8 * 777, beat * 70 + 8 * 5, beat * 163 + 8 * 2000 };
+    auto programs = [] (Store& st) {
+        program (st, 9, { 1, 2, stepPause, 3, 4 });
+        program (st, 10, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 });
+        program (st, 11, { stepFade + 4, 1, 2, stepBumper, 3, 4, 5 });
+    };
+    int shown = 0;
+    for (const Clocks& k : list)
+        for (uint64_t start : { beat * 6, beat * 9 + 8 * 1234 })
+            for (uint64_t gap : gaps)
+            {
+                Song a, b;
+                for (Song* s : { &a, &b })
+                {
+                    programs (s->e.bank());
+                    s->e.set (ParamId::sequence, (float) k.sequence), s->e.set (ParamId::incClock, (float) k.inc);
+                    s->e.set (ParamId::decClock, (float) k.dec), s->e.set (ParamId::resetClock, (float) k.reset);
+                    s->e.reset();
+                    s->run (start);
+                }
+                a.run (gap);
+                b.at += gap; // the song plays on, the sound does not run
+                a.run (8), b.run (8);
+                const Sequencer &x = a.e.sequencer(), &y = b.e.sequencer();
+                const bool same = x.pos == y.pos && x.mode == y.mode && x.fade == y.fade && x.filter == y.filter;
+                if (! same && shown++ < 6)
+                    std::printf ("  %s, gap %.3f beats from %.3f: step %d (%d) against %d (%d) run throughout\n", k.name, (double) gap / beat,
+                                 (double) start / beat, y.pos + 1, (int) y.mode, x.pos + 1, (int) x.mode);
+                CHECK (same);
+            }
+    // Far past maxReplay (40,000 bars of 1/32s): as many steps on as the clock passed, in a bounded replay.
+    {
+        Song s;
+        programs (s.e.bank());
+        s.e.set (ParamId::sequence, 10), s.e.set (ParamId::incClock, 13);
+        s.e.reset();
+        s.run (beat * 3 + 8 * 11);
+        const int before = s.e.sequencer().pos;
+        const int64_t lastStep = (int64_t) s.at - 8, gap = (int64_t) beat * 160000 + 8 * 4321;
+        s.at += (uint64_t) gap;
+        s.run (8);
+        const int64_t passed = ((int64_t) s.at - 8) / 3000 - lastStep / 3000; // a 1/32 is 3000 frames
+        CHECK (s.e.sequencer().pos == (int) ((before + passed) % 11));
+    }
+    // A loop one Reset long (the song back at the bar's start each time round): the Reset each time.
+    {
+        Song s;
+        programs (s.e.bank());
+        s.e.set (ParamId::sequence, 10), s.e.set (ParamId::incClock, 7), s.e.set (ParamId::resetClock, 1);
+        s.e.reset();
+        for (int pass = 0; pass < 3; ++pass)
+        {
+            s.at = 0;
+            s.run (8);
+            CHECK (s.e.sequencer().pos == 0);
+            s.run (beat * 4 - 8);
+            CHECK (s.e.sequencer().pos == 3);
+        }
+    }
+    // A jump back into the middle of a beat fires no Inc; onto a beat it does, the same cell or another.
+    {
+        Song s;
+        programs (s.e.bank());
+        s.e.set (ParamId::sequence, 10), s.e.set (ParamId::incClock, 7);
+        s.e.reset();
+        s.run (beat * 3 + beat / 2);
+        CHECK (s.e.sequencer().pos == 3);
+        s.at = beat + beat / 2;
+        s.run (8);
+        CHECK (s.e.sequencer().pos == 3);
+        s.at = beat;
+        s.run (beat / 4);
+        CHECK (s.e.sequencer().pos == 4);
+        s.at = beat;
+        s.run (8);
+        CHECK (s.e.sequencer().pos == 5);
+        s.at = 8 * 5; // back to just after a beat
+        s.run (8);
+        CHECK (s.e.sequencer().pos == 5);
+    }
+}
+
 void testFilterSettings()
 {
     const Stereo x = loop (48000.0, 1.0);
@@ -978,6 +1078,7 @@ int main()
     testRates();
     testSequencer();
     testSequencerEngine();
+    testClockGaps();
     testFilterSettings();
     testTextEdges();
     testPresets();

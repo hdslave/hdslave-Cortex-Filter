@@ -52,6 +52,22 @@ struct Plugin
     std::atomic<bool> paintAsked { false };
     std::atomic<uint32_t> meterUntil { 0 }; // the page's meters are kept up until this block (about a second after a paint)
     uint32_t sincePaint = 0; // frames since the audio thread last asked for a paint
+    std::atomic<bool> inputSeen { false }; // an input on the page since its last paint (used or not)
+    // A state's bank and sequences as loadBank() reads them, whole before any of it is used (main thread; each
+    // instance its own).
+    struct BankLoad
+    {
+        struct Filter
+        {
+            bool used, own;
+            char name[nameLength + 1];
+            float fields[fieldCount];
+        };
+        Filter filters[slotCount + 1];
+        uint8_t steps[sequenceCount + 1][maxSteps];
+        int lengths[sequenceCount + 1];
+        uint8_t seq[1 + 4096];
+    } bankLoad;
 };
 
 Plugin& of (const clap_plugin* p) { return *static_cast<Plugin*> (p->plugin_data); }
@@ -326,8 +342,7 @@ bool loadBank (Plugin& p, const clap_istream* stream)
     if (! readAll (stream, tag, 4) || std::memcmp (tag, bankTag, 4) != 0 || ! readAll (stream, sizes, sizeof (sizes)) || sizes[0] > 4096
         || sizes[1] > 256)
         return false;
-    struct Filter { bool used, own; char name[nameLength + 1]; float fields[fieldCount]; };
-    static Filter filters[slotCount + 1]; // main thread only
+    auto& filters = p.bankLoad.filters;
     float fields[256];
     for (uint32_t s = 1; s <= sizes[0]; ++s)
     {
@@ -336,7 +351,7 @@ bool loadBank (Plugin& p, const clap_istream* stream)
             return false;
         if (s > (uint32_t) slotCount)
             continue;
-        Filter& f = filters[s];
+        auto& f = filters[s];
         f.used = head[0] != 0, f.own = head[1] != 0;
         std::memcpy (f.name, head + 2, nameLength), f.name[nameLength] = 0;
         for (int k = 0; k < fieldCount; ++k)
@@ -346,9 +361,9 @@ bool loadBank (Plugin& p, const clap_istream* stream)
     if (! readAll (stream, tag, 4) || std::memcmp (tag, seqsTag, 4) != 0 || ! readAll (stream, seqSizes, sizeof (seqSizes)) || seqSizes[0] > 4096
         || seqSizes[1] > 4096)
         return false;
-    static uint8_t steps[sequenceCount + 1][maxSteps];
-    static int lengths[sequenceCount + 1];
-    static uint8_t seq[1 + 4096];
+    auto& steps = p.bankLoad.steps;
+    auto& lengths = p.bankLoad.lengths;
+    uint8_t* const seq = p.bankLoad.seq;
     for (uint32_t q = 1; q <= seqSizes[0]; ++q)
     {
         if (! readAll (stream, seq, 1 + seqSizes[1]))
@@ -494,10 +509,21 @@ bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t 
     return true;
 }
 
-void pluginDeactivate (const clap_plugin* plugin) { of (plugin).active = false; }
+// Stopped, reset or deactivated: the page's presses not yet taken are dropped (none fires when the sound comes back).
+void pluginDeactivate (const clap_plugin* plugin)
+{
+    auto& p = of (plugin);
+    p.active = false;
+    p.commands.clear();
+}
 bool pluginStart (const clap_plugin*) { return true; }
-void pluginStop (const clap_plugin*) {}
-void pluginReset (const clap_plugin* plugin) { of (plugin).engine.reset(); }
+void pluginStop (const clap_plugin* plugin) { of (plugin).commands.clear(); }
+void pluginReset (const clap_plugin* plugin)
+{
+    auto& p = of (plugin);
+    p.commands.clear();
+    p.engine.reset();
+}
 
 // Denormals: flush them to zero for the block (the filters ring down into them), as the FPU had it after.
 struct FlushDenormals
@@ -540,19 +566,21 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         }
     if (p.settle.exchange (false, std::memory_order_acq_rel))
         p.engine.settle();
-    // The page's triggers and wheel (the sequencer's Inc, Dec, Reset; stepping through a sequence's filters).
-    for (int k = 0; k < 3; ++k)
-        if (const uint32_t n = p.commands.trig[k].exchange (0, std::memory_order_acq_rel))
-            p.engine.trigger (k, n);
-    if (const int n = p.commands.browse.exchange (0, std::memory_order_acq_rel))
-        p.engine.browse (n);
 
-    // Events at the block's first frame come first, the transport after them.
+    // Events at the block's first frame come first, with the page's triggers and wheel (the sequencer's Inc, Dec,
+    // Reset; stepping through a sequence's filters: those given in the last half second), the transport after them.
     const auto* in = process->in_events;
     const uint32_t count = in != nullptr ? in->size (in) : 0;
     uint32_t next = 0;
     for (; next < count && in->get (in, next)->time == 0; ++next)
         handle (p, in->get (in, next));
+    if (p.commands.waiting())
+        p.commands.take (Commands::nowMs(), [&p] (int kind, int amount) {
+            if (kind == Commands::wheelKind)
+                p.engine.browse (amount);
+            else
+                p.engine.trigger (kind, (uint32_t) amount);
+        });
 
     if (const auto* t = process->transport)
     {
@@ -658,21 +686,27 @@ bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
         return false;
     auto& p = of (plugin);
     const hdui::Host h = hostOf (c);
-    // The host services this request while the page is visible, including when the audio thread sleeps.
-    if (p.hostScreen != nullptr)
-        p.hostScreen->request_paint (p.host);
-    const bool asked = p.paintAsked.exchange (false, std::memory_order_acq_rel);
-    if (! c->whole && ! asked && ! p.screen.hostChanged (h))
+    const bool asked = p.paintAsked.exchange (false, std::memory_order_acq_rel), changed = p.screen.hostChanged (h);
+    const bool input = p.inputSeen.exchange (false, std::memory_order_acq_rel);
+    // The page wakes for a few seconds when it opens, on an input, a value changed, the host's own (a knob turned,
+    // Shift, the song starting or stopping) and while sound runs (Screen::wake).
+    if (c->whole || asked || changed || input || p.screen.newBlocks())
+        p.screen.wake (h.nowMs);
+    bool drew = false;
+    if (! c->whole && ! asked && ! changed && p.screen.bodyAtRest (h))
+        drew = p.screen.paintTitleOnly (h, c->pixels, (int) c->stride);
+    else if (c->whole || asked || changed || p.screen.due (h.nowMs))
     {
-        if (p.screen.bodyAtRest (h))
-            return p.screen.paintTitleOnly (h, c->pixels, (int) c->stride);
-        if (! p.screen.due (h.nowMs))
-            return false;
+        p.meterUntil.store (p.feed.blocks.load (std::memory_order_relaxed) + 400, std::memory_order_relaxed);
+        p.screen.update (h.nowMs);
+        drew = p.screen.paint (h, c->pixels, (int) c->stride, c->whole);
+        p.screen.drew (h);
     }
-    p.meterUntil.store (p.feed.blocks.load (std::memory_order_relaxed) + 400, std::memory_order_relaxed);
-    p.screen.update (h.nowMs);
-    const bool drew = p.screen.paint (h, c->pixels, (int) c->stride, c->whole);
-    p.screen.drew (h);
+    // The next frame only while something moves: otherwise the title rests and nothing is asked for until the sound,
+    // a value or an input asks for a paint (each of them does), or the host paints on its own (the page in view
+    // again, a knob, the transport).
+    if (p.screen.moving (h) && p.hostScreen != nullptr)
+        p.hostScreen->request_paint (p.host);
     return drew;
 }
 
@@ -681,6 +715,7 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* e)
     if (e == nullptr || e->kind > MELODEE_SCREEN_NUDGE)
         return false;
     auto& p = of (plugin);
+    p.inputSeen.store (true, std::memory_order_release); // wakes the page, even an input it has no use for
     hdui::Edits edits;
     const uint32_t commandsBefore = p.commands.count();
     const bool used = p.screen.input ((hdui::Key) e->kind, e->value, e->shift, edits);
@@ -712,6 +747,8 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* e)
         p.host->request_process (p.host);
     if (used)
         invalidatePage (p);
+    else if (p.hostScreen != nullptr) // nothing to draw, but the title wakes
+        p.hostScreen->request_paint (p.host);
     return used;
 }
 
