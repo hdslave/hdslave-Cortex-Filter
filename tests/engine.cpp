@@ -244,7 +244,7 @@ void testLfo()
 
 void testEnvelopeGlideSpread()
 {
-    // The envelope reads -6 dB as 42/48 of the way up; with Env Gain 6 dB it is full.
+    // The envelope's modulation uses a quadratic curve on -48..0 dB: -6 dB reads as (42/48)^2; with Env Gain 6 dB it is full.
     {
         Rig r;
         for (int c = 0; c < 2; ++c)
@@ -254,7 +254,7 @@ void testEnvelopeGlideSpread()
         r.e.reset();
         for (int i = 0; i < 6000; ++i)
             r.block (false, false, 0.0);
-        NEAR (r.e.envelope(), 42.0 / 48.0, 2e-3);
+        NEAR (r.e.envelope(), (42.0 / 48.0) * (42.0 / 48.0), 2e-3);
         NEAR (r.e.left().y, r.e.envelope(), 1e-6);
         r.e.set (ParamId::envGain, 6.0f);
         for (int i = 0; i < 6000; ++i)
@@ -433,7 +433,8 @@ void testRates()
             NEAR (e.left().x, 1.0 - std::exp (-1.0), 0.01);
         }
         {
-            // Release 100 ms from a steady -6 dB: a time constant later it is down by e (8.7 dB).
+            // Release 100 ms from a steady -6 dB: a time constant later the detector is down by e (8.7 dB), squared
+            // for modulation and smoothed over 5 ms (so all three rates match).
             Engine e;
             e.prepare (rate, 128);
             e.set (ParamId::envFreq, 1.0f), e.set (ParamId::envRelease, releaseKnob (0.1f)), e.set (ParamId::freq, 0.0f);
@@ -441,8 +442,10 @@ void testRates()
             quiet (e, second, 0.5f);
             const float held = e.envelope();
             quiet (e, second / 10);
-            NEAR (held, 42.0 / 48.0, 2e-3);
-            NEAR (e.envelope(), (20.0 * std::log10 (0.5 * std::exp (-1.0)) + 48.0) / 48.0, 0.01);
+            const double heldExpect = (42.0 / 48.0) * (42.0 / 48.0);
+            const double relDbNorm = (20.0 * std::log10 (0.5 * std::exp (-1.0)) + 48.0) / 48.0;
+            NEAR (held, heldExpect, 2e-3);
+            NEAR (e.envelope(), relDbNorm * relDbNorm, 0.02);
         }
         {
             // Mix from 1 to 0 on a steady input through a high pass (which passes none of it): 20 ms later the dry
@@ -1185,11 +1188,11 @@ void testVerifiedFixes()
         e.render (in, in, outL, outR, 128);
         CHECK (outL[0] != 0.0f);
     }
-    // The reported tail covers the longest ring: Bell Tower's hum (27.5 Hz, Q 80 at full Emphasis), rung up with a
-    // sine at its own frequency, then let go. Measured here; tailSeconds must cover it, and not by much.
+    // The reported tail covers the longest ring: Bell Tower's hum (27.5 Hz, Q 80 at Transform 1 and full Emphasis),
+    // rung up with a sine at its own frequency, then let go. Measured here; tailSeconds must cover it, and not by much.
     {
         Design d;
-        design (cubeTable (7), { 1.0f, 0.0f, 0.0f }, 1.0f, 48000.0f, d);
+        design (cubeTable (7), { 1.0f, 0.0f, 1.0f }, 1.0f, 48000.0f, d);
         BandState st[maxBands] {};
         const double w = 2.0 * pi * 27.5 / 48000.0;
         for (long n = 0; n < 48000 * 8; ++n)
@@ -1213,6 +1216,96 @@ void testVerifiedFixes()
         const double rings = last / 48000.0;
         std::printf ("  worst ring: %.2f s of the %.1f s tail reported\n", rings, (double) tailSeconds);
         CHECK (rings > 9.0 && rings <= tailSeconds);
+    }
+}
+
+// 0.3.0 DSP quality fixes: distortion level stability and zero headroom loss under 0 dB, seamless distortion drop on
+// resonant states, same-cube sequence steps without mute dropouts, high-Emphasis LP/HP peak control, Swirl crossing
+// freedom, and Harmonic Comb mid-cube contrast.
+void testDspImprovements()
+{
+    const float rate = 48000.0f;
+    const Stereo music = loop (rate, 2.0);
+    // 1. Distortion at high drive (F19 Vowel Crush at Transform 100%) stays audible (no collapse to -40 dBFS),
+    // and negative distortion (-6 dB on F03 Vowels) stays clean on a normal-level loop.
+    {
+        auto renderSlot = [&] (int slot, float tf, float distOverride) {
+            Engine e;
+            e.prepare (rate, 128);
+            e.set (ParamId::filter, (float) slot);
+            if (distOverride > -99.0f)
+                e.bank().setField (slot, fieldDistLeft, distOverride), e.bank().setField (slot, fieldDistRight, distOverride);
+            e.set (ParamId::morph, 0.5f), e.set (ParamId::freq, 0.5f), e.set (ParamId::transform, tf);
+            e.reset();
+            std::vector<float> l (music.l.size()), r (music.r.size());
+            e.render (music.l.data(), music.r.data(), l.data(), r.data(), (uint32_t) l.size());
+            return l;
+        };
+        const auto crushed = renderSlot (19, 1.0f, -100.0f);
+        float peak = 0.0f;
+        for (float v : crushed)
+            peak = std::max (peak, std::fabs (v));
+        CHECK (peak > 0.15f && peak <= 1.0f);
+        const auto off = renderSlot (3, 0.5f, -30.0f), head = renderSlot (3, 0.5f, -6.0f);
+        float maxDiff = 0.0f;
+        for (size_t i = 0; i < off.size(); ++i)
+            maxDiff = std::max (maxDiff, std::fabs (off[i] - head[i]));
+        CHECK (maxDiff < 1e-4f); // clean under headroom (no premature clipping on the loop)
+    }
+    // 2. Same-cube sequencer steps (Acid Steps: F17 -> F10 -> F18) glide without dipping to silence or exploding
+    // when distortion turns off across -30 dB.
+    {
+        Engine e;
+        e.prepare (rate, 128);
+        e.set (ParamId::filter, 10.0f), e.set (ParamId::sequence, 5.0f), e.set (ParamId::incClock, 11.0f);
+        e.reset();
+        std::vector<float> in (12000), outL (12000), outR (12000);
+        for (size_t i = 0; i < in.size(); ++i)
+            in[i] = 0.5f * std::sin (2.0f * pi * 110.0f * (float) i / rate);
+        for (size_t at = 0; at < in.size(); at += 128)
+        {
+            e.transport (true, true, (double) at / 24000.0, 120.0);
+            e.render (in.data() + at, in.data() + at, outL.data() + at, outR.data() + at, (uint32_t) std::min<size_t> (128, in.size() - at));
+        }
+        double minRms = 1e9, maxPeak = 0.0;
+        for (int w = 0; w <= 8; ++w)
+        {
+            double s = 0.0;
+            for (int i = 6000 + w * 48; i < 6000 + (w + 1) * 48; ++i)
+                s += outL[i] * outL[i], maxPeak = std::max (maxPeak, (double) std::fabs (outL[i]));
+            minRms = std::min (minRms, std::sqrt (s / 48.0));
+        }
+        CHECK (minRms > 0.08 && maxPeak < 1.0); // no mute hole (was 0.009) and no +30 dB dist-off burst
+    }
+    // 3. Emphasis +100% on Acid Twins stays controlled under +26 dB (was +35.8 dB); Swirl has no crossing spike
+    // above +8 dB (was +15.7 dB); Harmonic Comb keeps > 5 dB comb contrast at Transform = 0.5 (was flat).
+    {
+        double acidTop = -1e9, swirlTop = -1e9;
+        for (int i = 0; i < 9 * 9 * 9; ++i)
+        {
+            const Position p { (i % 9) / 8.0f, ((i / 9) % 9) / 8.0f, (i / 81) / 8.0f };
+            Design da, ds;
+            design (cubeTable (9), p, 1.0f, rate, da);
+            design (cubeTable (11), p, 0.0f, rate, ds);
+            for (int f = 0; f < 240; ++f)
+            {
+                const float hz = 20.0f * std::pow (1000.0f, (f + 0.5f) / 240.0f);
+                acidTop = std::max (acidTop, (double) responseDb (da, hz, rate));
+                swirlTop = std::max (swirlTop, (double) responseDb (ds, hz, rate));
+            }
+        }
+        CHECK (acidTop < 26.0 && swirlTop < 8.0);
+
+        Design combMid;
+        design (cubeTable (5), { 0.0f, 0.5f, 0.5f }, 0.0f, rate, combMid);
+        double lo = 1e9, hi = -1e9;
+        for (int f = 0; f < 400; ++f)
+        {
+            const float hz = 20.0f * std::pow (1000.0f, (f + 0.5f) / 400.0f);
+            const double db = responseDb (combMid, hz, rate);
+            lo = std::min (lo, db), hi = std::max (hi, db);
+        }
+        CHECK (hi - lo > 5.0);
     }
 }
 
@@ -1246,6 +1339,7 @@ int main()
     testFilterSettings();
     testTextEdges();
     testVerifiedFixes();
+    testDspImprovements();
     testPresets();
     std::printf ("engine: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

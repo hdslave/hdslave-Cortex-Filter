@@ -12,9 +12,15 @@ Since 0.2.0 it brings the full module workflow to the MPC: each **filter** in th
 
 Under **hdslaveOS**, Cortex Filter renders a live rotating 3D cube, a 3D frequency-response waterfall, axis/level meters, and dedicated filter-editing and sequence-programming pages (see [The screen](#the-screen)).
 
-**Version 0.2.2** fixes the envelope trigger at Trig Level 0 dB (it could never fire there), reports its (zero)
-latency and its measured 11-second tail to hosts that ask, and keeps page presses made while the sound sleeps.
-The sound is otherwise 0.2.1's to the bit.
+**Version 0.3.0** upgrades the audio DSP and cube voicing for smoother, fuller, more playable sound at under 3.5 % of one
+A55 core in the worst distorted case: per-sample linear interpolation of the SVF and mix coefficients across the 8-frame
+control steps (matching per-sample filter design to within 0.3 dB on modulation artifacts), re-staged in-filter
+distortion with a linear-core soft knee that stays clean under 0 dB and never collapses in level up to +70 dB (plus
+state rescaling across −30 dB and post-distortion smoothing through trailing low-pass bands), seamless same-cube filter
+morphing in sequences (no mute dropouts on Acid Steps) with smoothstep fades on cube changes, a quadratic smoothed
+envelope follower curve, high-Emphasis peak compensation on resonant LP/HP cubes, and re-voiced cubes (de-stacked
+tenors in Vowels, low-passed modal Resonators with musical Qs, non-crossing Shepard Swirl, active mid-cube Harmonic
+Comb, non-colliding Acid Twins, and stronger baseline levels).
 
 ## Signal flow
 
@@ -38,17 +44,18 @@ Each corner filter is up to seven bands in series. Each band is a state-variable
 high-pass outputs are mixed with its input, so one band can be a peak or dip (in dB), a low or high pass, a band pass,
 a notch or an all pass, or anything between. Inside the cube the corners' bands are blended (frequency and Q on a log
 scale, the mix linearly, a bell's gain in dB) and the filter is built from the blend, so every point is one stable
-filter and the morph moves smoothly. The point and the filter are worked out every 8 frames; gains glide every sample.
+filter and the morph moves smoothly. The point and the filter are worked out every 8 frames and their coefficients
+interpolated linearly per sample across each step; gains glide every sample.
 
 ## Controls
 
 | Control | Range | What it does |
 |---|---|---|
-| Filter | F01 – F64 | The filter heard while no sequence runs (below), and the one the edit filter's controls show. A change dips the filtered sound: down over the old filter's Exit Fade, the new one in with its filter emptied, up over its Enter Fade (3 ms each as the factory has them), so a ringing cube never bursts into the next |
+| Filter | F01 – F64 | The filter heard while no sequence runs (below), and the one the edit filter's controls show. Changing between two filters on the same cube whose settings differ glides smoothly over Enter Fade without muting or clearing the resonant state; changing cubes (or fading between identical settings like Bar Gate) uses a smoothstep dip down over Exit Fade, clears the filter, and comes up over Enter Fade (3 ms each as the factory has them) |
 | Morph | 0 – 100 % | X: the cube's first morph |
 | Freq | 0 – 100 % | Y: in most cubes it moves the whole shape up or down in frequency (a cutoff knob for it) |
 | Transform | 0 – 100 % | Z: the cube's second morph |
-| Emphasis | ±100 % | Every band's Q, from half to four times as sharp; widened peaks come down as they widen, so the level holds |
+| Emphasis | ±100 % | Every band's Q, from half to four times as sharp; widened peaks come down as they widen, and high-Q resonant low/high-pass peaks are level-trimmed above Q = 4 so the level stays controlled |
 | Glide | 1 ms – 2 s | How fast Morph, Freq and Transform follow their knobs |
 | Drive | 0 – +24 dB | Into a soft saturator before the filter, blended in over its first 6 dB and level-compensated by half its gain; 0 dB is the input untouched |
 | Mix | 0 – 100 % | The filtered sound against the dry input; 0 % with Output at 0 dB gives an input within full scale back to the bit |
@@ -59,7 +66,7 @@ filter and the morph moves smoothly. The point and the filter are worked out eve
 | LFO Shape | Sine, Triangle, Saw Up, Saw Down, Square, S&H, Drift | S&H and Drift draw new values each cycle, the same for the same place in the song |
 | LFO Phase | 0 – 360° | How far ahead of Morph's the LFO's phase is on Freq, and twice that on Transform: 0° moves all three together (a line), 90° turns it into an orbit |
 | LFO > Morph, > Freq, > Transform | ±100 % | Depth on each axis: 100 % swings it half the axis each way |
-| Env Gain | 0 – +24 dB | The envelope follower's input gain; it reads −48 dB to 0 dB as nothing to full |
+| Env Gain | 0 – +24 dB | The envelope follower's input gain; triggers read −48 dB to 0 dB linearly in dB, while axis modulation uses a quadratic curve smoothed over 5 ms for punchy dynamic sweep without bass FM ripple |
 | Env Attack | 0.1 – 200 ms | |
 | Env Release | 5 ms – 2 s | |
 | Env > Morph, > Freq, > Transform | ±100 % | Depth on each axis: 100 % moves it the axis's whole length at full level |
@@ -84,7 +91,7 @@ the bank (as turning the module's own controls would), and the rewritten filter 
 | Morph / Freq / Transform Gain | −9.9x – +9.9x | How far the knobs and their modulation reach, around the middle: 2.0x crosses the axis in half the knob's travel, a negative gain turns it round |
 | Enter Fade, Exit Fade | 1 ms – 4 s | How long the filter takes to come in, and to go, when the filter changes; a change takes the old filter's Exit plus the new one's Enter |
 | Left Gain, Right Gain | −40 – +40 dB | The filter's level on each side, after it |
-| Left Dist, Right Dist | −30 – +70 dB | Distortion inside the filter: the signal is driven into a saturator after every band, so how it breaks up depends on the cube. −30 dB is none at all; under 0 dB it only sets the headroom (clean until the signal inside reaches it); over 0 dB it drives into the saturators, scaled back by half as much, so it gets grittier and only a little louder |
+| Left Dist, Right Dist | −30 – +70 dB | Distortion inside the filter: the cube's gain is staged before the bands and each band (before any trailing low-pass) feeds a linear-core soft-knee saturator, so how it breaks up depends on the cube. −30 dB is none at all; under 0 dB it only sets the headroom (clean until the signal inside reaches it, with no level jump or state burst across −30 dB); over 0 dB it drives into the saturators with bounded post-makeup so heavy drive stays thick and audible all the way to +70 dB |
 | Xform > Dist | Off, On | On: the Transform knob, its modulation and Transform Gain (read as Dist Gain) drive the distortion, 10 dB for every 10 % of Transform from its middle, on top of Left and Right Dist; Transform sits where its offset puts it |
 
 On the page, **Copy** puts the filter into the next empty slot (which Filter then picks) and **Restore** (pushed twice)
@@ -147,7 +154,7 @@ with its Cube as the factory's filter for that cube, sounding as it did.
 | 9 | Radio Tuner | full range to a telephone band | moves the band | adds a honk and steep edges |
 | 10 | Acid Twins | squelchy resonant low pass to resonant band pass | cutoff | splits the peak in two, a fifth apart |
 | 11 | Hollow Tube | uneven notches to harmonic ones | moves them | adds peaks between them |
-| 12 | Swirl | five peaks turning like a barber's pole (four climb, the top one falls through them) | shifts them | peaks to dips |
+| 12 | Swirl | five peaks turning like a barber's pole (Shepard sweep: all climb monotonically, fading in at the bottom and out at the top) | shifts them | peaks to dips |
 | 13 | Metal Plate | a struck plate's modes to a bar's | pitch | rings longer |
 | 14 | Tilt Air | a tone control: dark to bright | shifts it | scoops the mids |
 | 15 | Sub Thump | a sub boom to a punchy mid-bass with the boxiness cut | shifts it | resonates |
@@ -255,24 +262,23 @@ instruction a cycle):
 
 | Case | Instructions | Share of one A55 core |
 |---|---|---|
-| Worst: a seven-band cube, both sides apart, a fast LFO on all three axes, the envelope, Drive | about 102,000 | 2.1 % |
-| The same with the filter's distortion on both sides | about 123,000 | 2.6 % |
-| The same distorted, Acid Steps stepping every sixteenth | about 74,000 | 1.5 % |
-| Typical: a five-band cube moved by the LFO | about 43,000 | 0.9 % |
-| Standing still | about 39,000 | 0.8 % |
+| Worst: a seven-band cube, both sides apart, a fast LFO on all three axes, the envelope, Drive | about 137,000 | 2.9 % |
+| The same with the filter's distortion on both sides | about 167,000 | 3.5 % |
+| The same distorted, Acid Steps stepping every sixteenth | about 93,000 | 1.9 % |
+| Typical: a five-band cube moved by the LFO | about 56,000 | 1.2 % |
+| Standing still | about 41,000 | 0.9 % |
 
-The filter bank and the sequencer add about 3,000 – 4,000 instructions a block to 0.1.0's figures; the sound of the
-factory's F01 – F16 is 0.1.0's to the bit (the fingerprints below). The page's input and output meters are worked
-out only while Melodee paints the page.
+The page's input and output meters are worked out only while Melodee paints the page.
 
 The left and right channels run side by side in one vector register, through a loop unrolled for the cube's band
 count. While the point moves, the filter is worked out again every 8 frames, with polynomial `exp2` and `tan`
-(accurate to about 1e-6) and the corners blended four at a time; standing still, never. Those steps add images of a
-tone about 80 dB under it while an LFO sweeps vowels (`tools/artifacts.sh`); only the most extreme moves (a 20 Hz LFO,
-a 0.1 ms envelope attack, both crossing octaves in milliseconds) add a few dB to the high end the move makes anyway.
+(accurate to about 1e-6) and the corners blended four at a time, and its SVF and gain coefficients are linearly
+interpolated per sample across each 8-frame step; standing still, neither runs. That keeps modulation artifacts
+within 0.3 dB of per-sample filter design (`-98.1 dB` on a 3 Hz vowel sweep and `-83.0 dB` on a 20 Hz resonant sweep,
+`tools/artifacts.sh`).
 
-A frame of the CUBE page takes about 560,000 instructions (about 0.31 ms) on Melodee's screen thread in TIME view,
-about 660,000 in MORPH view while the point moves (its landscape follows a few slices a frame), at most about 30
+A frame of the CUBE page takes about 576,000 instructions (about 0.32 ms) on Melodee's screen thread in TIME view,
+about 662,000 in MORPH view while the point moves (its landscape follows a few slices a frame), at most about 30
 frames a second while it moves. While nothing else moves, only the title is drawn again: a frame every 60 ms, about
 18,300 instructions each (about 0.02 % of a core), for the 4 seconds it stays awake; then none, and none while the page
 is out of view.
