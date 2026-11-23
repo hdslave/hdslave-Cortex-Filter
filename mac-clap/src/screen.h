@@ -26,7 +26,6 @@
 
 #include <atomic>
 #include <cctype>
-#include <chrono>
 
 namespace cortex
 {
@@ -45,36 +44,39 @@ struct Feed
     std::atomic<float> control[3] {};
     std::atomic<float> meters[6] {}; // input L/R, distortion L/R, output L/R
     std::atomic<uint32_t> blocks { 0 };
+    std::atomic<uint64_t> frames { 0 }; // frames rendered, so a second is a second at any block size
 };
 
 // What the page asks of the sound: Inc, Dec and Reset pressed, and the wheel through a sequence's filters. Each is
-// stamped (the steady clock's milliseconds) when the page gives it, and the audio thread takes those given since its
-// last block at its next one, dropping any given more than keepMs before: a press made while the sound was not
-// running is not fired later. A ring that only the page's thread writes and only the audio thread reads and clears
-// (on stop and reset; on deactivate too, when nothing is processing).
+// stamped with how many frames the sound has rendered when the page gives it, and the audio thread takes those
+// given since its last block at its next one, dropping any given more than half a second of sound before. The
+// stamp is in frames, not wall time (no clock is read on the audio thread): while the sound sleeps no frames
+// pass, so a press that wakes it is still fresh and fires once; a press given while stopped is dropped by clear()
+// (on stop and reset; on deactivate too, when nothing is processing). A ring that only the page's thread writes
+// and only the audio thread reads and clears.
 struct Commands
 {
     static constexpr int wheelKind = 3; // kinds 0-2 are Inc, Dec and Reset
-    static constexpr int64_t keepMs = 500;
-    static int64_t nowMs()
-    {
-        return std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
 
     void press (int which) { put (which, 1); }
     void wheel (int steps) { put (wheelKind, steps); }
     uint32_t count() const { return given.load (std::memory_order_relaxed); } // every one the page gave
+    // The plug-in's, at activate and after each block: half a second of sound is how long a command stays fresh,
+    // and a block more of it has been rendered.
+    void keepFor (float rate) { keepFrames.store ((uint64_t) (rate * 0.5f), std::memory_order_relaxed); }
+    void tick (uint32_t frames) { rendered.fetch_add (frames, std::memory_order_relaxed); }
     // The audio thread's: whether any wait; each still fresh to `use` (kind, amount) in the order given, the rest
     // dropped.
     bool waiting() const { return head.load (std::memory_order_relaxed) != tail.load (std::memory_order_acquire); }
     template <typename Use>
-    void take (int64_t now, Use&& use)
+    void take (Use&& use)
     {
+        const uint64_t now = rendered.load (std::memory_order_relaxed), keep = keepFrames.load (std::memory_order_relaxed);
         const uint32_t end = tail.load (std::memory_order_acquire);
         for (uint32_t at = head.load (std::memory_order_relaxed); at != end; ++at)
         {
             const Command& c = ring[at % size];
-            if (now - c.ms <= keepMs)
+            if (now - c.frame <= keep)
                 use (c.kind, c.amount);
         }
         head.store (end, std::memory_order_release);
@@ -85,18 +87,19 @@ private:
     struct Command
     {
         int kind, amount;
-        int64_t ms;
+        uint64_t frame;
     };
     static constexpr uint32_t size = 64;
     Command ring[size] {};
     std::atomic<uint32_t> head { 0 }, tail { 0 }, given { 0 };
+    std::atomic<uint64_t> rendered { 0 }, keepFrames { 24000 }; // frames rendered; half a second of them (48 kHz until told)
     void put (int kind, int amount)
     {
         given.fetch_add (1, std::memory_order_relaxed);
         const uint32_t at = tail.load (std::memory_order_relaxed);
         if (at - head.load (std::memory_order_acquire) >= size)
             return; // full: the sound has taken none of the last 64 (it is not running); this one is dropped
-        ring[at % size] = { kind, amount, nowMs() };
+        ring[at % size] = { kind, amount, rendered.load (std::memory_order_relaxed) };
         tail.store (at + 1, std::memory_order_release);
     }
 };
@@ -219,10 +222,10 @@ public:
         if (fired != seenTriggers)
             seenTriggers = fired, flashUntilMs = nowMs + flashMs;
         // The meters: the loudest since the last paint, falling back 30 dB a second.
+        const float fall = std::pow (10.0f, -1.5f * (float) since / 1000.0f);
         for (int m = 0; m < 6; ++m)
         {
             const float peak = feed.meters[m].exchange (0.0f, std::memory_order_relaxed);
-            const float fall = std::pow (10.0f, -1.5f * (float) since / 1000.0f);
             meter[m] = live ? std::max (peak, meter[m] * fall) : 0.0f;
         }
 

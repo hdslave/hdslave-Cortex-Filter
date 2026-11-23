@@ -32,10 +32,12 @@ struct CubeTable
     int bands = 0; // bands some corner uses; the rest pass everything everywhere and are skipped
     float band[maxBands][blendFieldCount][8] {};
     bool bell[maxBands] {}; // some corner has a bell on the band
+    bool tailLowpass = false; // last band is a pure low pass at every corner (distortion saturates before it)
     float gainDb[8] {}, dry[8] {};
 };
 
 inline bool atRest (const Band& b) { return b.dry == 1.0f && b.lp == 0.0f && b.bp == 0.0f && b.hp == 0.0f && b.bellDb == 0.0f; }
+inline bool isPureLowpass (const Band& b) { return b.dry == 0.0f && b.lp > 0.0f && b.bp == 0.0f && b.hp == 0.0f && b.bellDb == 0.0f; }
 
 // Built once, on first use (the plug-in asks at init, on the main thread).
 inline const CubeTable* cubeTables()
@@ -64,6 +66,13 @@ inline const CubeTable* cubeTables()
                 }
                 t[c].gainDb[corner] = f.gainDb;
                 t[c].dry[corner] = f.dry;
+            }
+            if (t[c].bands > 1)
+            {
+                bool allLp = true;
+                for (int corner = 0; corner < 8; ++corner)
+                    allLp &= isPureLowpass (spec.corner[corner].band[t[c].bands - 1]);
+                t[c].tailLowpass = allLp;
             }
         }
         return t;
@@ -112,13 +121,15 @@ struct BandState
 };
 
 // The filter at a point: its bands, then wet * (the bands' output) + dryGain * (their input). g and k (the
-// frequency's prewarped tangent and 1 / Q) are kept for the response.
+// frequency's prewarped tangent and 1 / Q) are kept for the response; gain and parallel are split out so in-filter
+// distortion can stage the cube's gain before the bands instead of crushing saturated output under it.
 struct Design
 {
     int bands = 0;
     BandCoefs band[maxBands] {};
     float g[maxBands] {}, k[maxBands] {};
-    float wet = 1.0f, dryGain = 0.0f;
+    float wet = 1.0f, dryGain = 0.0f, gain = 1.0f, parallel = 0.0f;
+    bool tailLowpass = false;
 };
 
 // The corners' weights, four to a vector (a NEON register on the MPC), and a value blended by them: eight corners in
@@ -150,20 +161,30 @@ inline float blend (const float* v, const Weights& w)
 inline void design (const CubeTable& c, const Position& p, float emphasis, float rate, Design& d)
 {
     const Weights w = weightsOf (p);
-    const float qShift = emphasis * (emphasis < 0.0f ? emphasisWideOctaves : emphasisOctaves), piOverRate = pi / rate;
-    const float lowest = 3.321928f, highest = std::log2 (0.45f * rate); // log2 of 10 Hz and of 0.45 of the rate
+    // The rate's two constants, kept from the last design at this rate on this thread (the sound designs on the
+    // audio thread, the screen on its own, and instances share neither; worked out again only when it changes;
+    // the same values either way, so the design is to the bit as it was).
+    thread_local float rateSeen = 0.0f, piOverRateSeen = 0.0f, highestSeen = 0.0f;
+    if (rate != rateSeen)
+        piOverRateSeen = pi / rate, highestSeen = std::log2 (0.45f * rate), rateSeen = rate;
+    const float qShift = emphasis * (emphasis < 0.0f ? emphasisWideOctaves : emphasisOctaves), piOverRate = piOverRateSeen;
+    const float lowest = 3.321928f, highest = highestSeen; // log2 of 10 Hz and of 0.45 of the rate
     constexpr float leastLogQ = -3.321928f, mostLogQ = 6.321928f;     // log2 of minQ and maxQ
     static_assert (minQ == 0.1f && maxQ == 80.0f, "the log2 above are these");
     // Emphasis below 0 widens the bands; a wider boost would add as much more energy as it is wider (its energy goes
     // as its gain squared times its width), so a boost comes down by as many dB as that, to no less than half.
     const float widen = qShift < 0.0f ? 3.0103f * qShift : 0.0f;
+    float emphTrimDb = 0.0f;
     d.bands = c.bands;
+    d.tailLowpass = c.tailLowpass;
     for (int b = 0; b < c.bands; ++b)
     {
         const auto& f = c.band[b];
         const float logAt = blend (f[logHz], w);
         const float hz = fastExp2 (std::clamp (logAt, lowest, highest));
-        const float k = fastExp2 (-std::clamp (blend (f[logQ], w) + qShift, leastLogQ, mostLogQ)); // 1 / Q
+        const float baseLogQ = blend (f[logQ], w);
+        const float effLogQ = std::clamp (baseLogQ + qShift, leastLogQ, mostLogQ);
+        const float k = fastExp2 (-effLogQ); // 1 / Q
         const float g = fastTan (hz * piOverRate);
         const float a1 = 1.0f / (1.0f + g * (g + k)), a2 = g * a1, a3 = g * a2;
         float bell = 0.0f;
@@ -179,24 +200,42 @@ inline void design (const CubeTable& c, const Position& p, float emphasis, float
             bell = fastExp2 (db * dbToLog2) - 1.0f;
         }
         const float dry = blend (f[dryMix], w), lp = blend (f[lpMix], w), bp = blend (f[bpMix], w) + bell, hp = blend (f[hpMix], w);
+        // Emphasis above 0 sharpens resonant LP/HP peaks (unlike bells and BP, which scale by k = 1 / Q). Compensate
+        // by half the extra resonant peak growth above Q = 4 (log2 Q > 2), capped at 12 dB, so gentle utility HP/LP
+        // edges on Vowels/Resonators keep their level while resonant LP/HP cubes don't blast +35 dB into the limiter.
+        if (qShift > 0.0f)
+        {
+            const float lphp = std::min (std::fabs (lp) + std::fabs (hp), 1.0f);
+            if (lphp > 0.0f)
+            {
+                const float growth = std::max (0.0f, effLogQ - 2.0f) - std::max (0.0f, baseLogQ - 2.0f);
+                if (growth > 0.0f)
+                    emphTrimDb += 3.0103f * growth * lphp;
+            }
+        }
         d.band[b] = { a1, a2, a3, dry + hp, k * (bp - hp), lp - hp };
         d.g[b] = g, d.k[b] = k;
     }
-    const float gain = fastExp2 (blend (c.gainDb, w) * dbToLog2), parallel = blend (c.dry, w);
+    const float gain = fastExp2 ((blend (c.gainDb, w) - std::min (emphTrimDb, 12.0f)) * dbToLog2), parallel = blend (c.dry, w);
+    d.gain = gain;
+    d.parallel = parallel;
     d.wet = gain * (1.0f - parallel);
     d.dryGain = gain * parallel;
 }
 
-// One sample through one band.
-__attribute__ ((always_inline)) inline float runBand (const BandCoefs& c, BandState& s, float x)
+// One sample through one band, on a lane of any width (a float here, engine.h's stereo pair in the sound):
+// the one place the recurrence is written, so what the tests measure and what is heard cannot drift apart.
+template <typename Coefs, typename State, typename Lane>
+__attribute__ ((always_inline)) inline Lane runBandStep (const Coefs& c, State& s, Lane x)
 {
-    const float v3 = x - s.ic2;
-    const float v1 = c.a1 * s.ic1 + c.a2 * v3;
-    const float v2 = s.ic2 + c.a2 * s.ic1 + c.a3 * v3;
+    const Lane v3 = x - s.ic2;
+    const Lane v1 = c.a1 * s.ic1 + c.a2 * v3;
+    const Lane v2 = s.ic2 + c.a2 * s.ic1 + c.a3 * v3;
     s.ic1 = 2.0f * v1 - s.ic1;
     s.ic2 = 2.0f * v2 - s.ic2;
     return c.m0 * x + c.m1 * v1 + c.m2 * v2;
 }
+__attribute__ ((always_inline)) inline float runBand (const BandCoefs& c, BandState& s, float x) { return runBandStep (c, s, x); }
 
 // The filter's gain at a frequency whose tan(pi f / rate) is `t`, in dB (down to -200). Each band is the analog
 // prototype at s = j t / g, which is what the trapezoidal filter is.
@@ -216,6 +255,10 @@ inline float responseDbAt (const Design& d, double t)
     re = d.wet * re + d.dryGain, im = d.wet * im;
     return (float) (10.0 * std::log10 (re * re + im * im + 1e-20));
 }
+
+// How long the longest ring lasts: Bell Tower's hum at 27.5 Hz and Q 80 (full Emphasis), measured in
+// tests/engine.cpp by ringing it up and timing its fall to -100 dBFS. Reported to hosts as the tail.
+constexpr float tailSeconds = 11.0f;
 
 // The same at `hz`.
 inline double tanOf (float hz, float rate) { return std::tan ((double) pi * std::min ((double) hz, 0.4999 * rate) / rate); }

@@ -34,21 +34,21 @@ using namespace ParamId;
 // Trigger: Inc 1. A preset leaves the bank and the sequences as they are: it picks from them.
 constexpr PresetValue talkingLoop[] = {
     { filter, 3.0f }, { morph, 0.5f }, { freq, 0.5f }, { transform, 0.5f }, { lfoSync, 4.0f }, { lfoPhase, 0.25f },
-    { lfoMorph, 0.9f }, { lfoTransform, 0.9f }, { output, 5.5f },
+    { lfoMorph, 0.9f }, { lfoTransform, 0.9f }, { output, 4.2f },
 };
 constexpr PresetValue phaseDrift[] = {
     { filter, 5.0f }, { morph, 0.3f }, { freq, 0.35f }, { transform, 0.4f }, { lfoRate, 0.2917f }, { lfoFreq, 0.8f },
 };
 constexpr PresetValue envelopeWah[] = {
     { filter, 7.0f }, { morph, 0.2f }, { freq, 0.1f }, { transform, 0.5f }, { envGain, 6.0f }, { envAttack, 0.3f },
-    { envRelease, 0.45f }, { envFreq, 0.9f }, { output, 7.5f },
+    { envRelease, 0.45f }, { envFreq, 0.9f }, { output, 6.0f },
 };
 constexpr PresetValue harmonicSwirl[] = {
     { filter, 6.0f }, { morph, 0.0f }, { freq, 0.4f }, { transform, 0.0f }, { lfoSync, 5.0f }, { lfoShape, 1.0f },
-    { lfoMorph, 1.0f }, { spread, 0.6f }, { mix, 0.8f }, { output, 2.0f },
+    { lfoMorph, 1.0f }, { spread, 0.6f }, { mix, 0.8f }, { output, 1.5f },
 };
 constexpr PresetValue bellRinger[] = {
-    { filter, 8.0f }, { morph, 0.6f }, { freq, 0.45f }, { transform, 0.6f }, { drive, 6.0f }, { mix, 0.7f },
+    { filter, 8.0f }, { morph, 0.6f }, { freq, 0.45f }, { transform, 0.6f }, { drive, 6.0f }, { mix, 0.7f }, { output, -0.5f },
 };
 constexpr PresetValue acidEnvelope[] = {
     { filter, 10.0f }, { morph, 0.1f }, { freq, 0.35f }, { transform, 0.3f }, { emphasis, 0.3f }, { drive, 9.0f },
@@ -56,11 +56,11 @@ constexpr PresetValue acidEnvelope[] = {
 };
 constexpr PresetValue radioDrift[] = {
     { filter, 9.0f }, { morph, 0.8f }, { freq, 0.5f }, { transform, 0.4f }, { lfoShape, 6.0f }, { lfoRate, 0.35f },
-    { lfoFreq, 0.5f }, { lfoTransform, 0.6f }, { output, 4.5f },
+    { lfoFreq, 0.5f }, { lfoTransform, 0.6f }, { output, 4.0f },
 };
 constexpr PresetValue wideSpace[] = {
     { filter, 12.0f }, { morph, 0.5f }, { freq, 0.5f }, { transform, 0.2f }, { lfoSync, 2.0f }, { lfoPhase, 0.333f },
-    { lfoMorph, 0.8f }, { lfoFreq, 0.4f }, { lfoTransform, 0.4f }, { spread, 1.0f }, { mix, 0.85f }, { output, 2.5f },
+    { lfoMorph, 0.8f }, { lfoFreq, 0.4f }, { lfoTransform, 0.4f }, { spread, 1.0f }, { mix, 0.85f }, { output, 2.0f },
 };
 constexpr PresetValue acidSequence[] = {
     { filter, 10.0f }, { sequence, 5.0f }, { incClock, 11.0f }, { resetClock, 1.0f }, { morph, 0.15f }, { freq, 0.45f }, { transform, 0.35f },
@@ -68,7 +68,7 @@ constexpr PresetValue acidSequence[] = {
 };
 constexpr PresetValue vowelWalk[] = {
     { filter, 3.0f }, { sequence, 6.0f }, { incClock, 9.0f }, { resetClock, 2.0f }, { morph, 0.5f }, { freq, 0.5f }, { transform, 0.5f },
-    { lfoSync, 4.0f }, { lfoMorph, 0.4f }, { output, 7.0f },
+    { lfoSync, 4.0f }, { lfoMorph, 0.4f }, { output, 5.0f },
 };
 constexpr PresetValue hitSteps[] = {
     { filter, 8.0f }, { sequence, 3.0f }, { incClock, 0.0f }, { envTrigger, 1.0f }, { trigLevel, -20.0f }, { envAttack, 0.15f },
@@ -76,11 +76,11 @@ constexpr PresetValue hitSteps[] = {
 };
 constexpr PresetValue barGate[] = {
     { filter, 27.0f }, { sequence, 7.0f }, { incClock, 9.0f }, { resetClock, 1.0f }, { morph, 0.5f }, { freq, 0.5f }, { transform, 0.4f },
-    { output, 1.5f },
+    { output, 0.8f },
 };
 constexpr PresetValue wander[] = {
     { filter, 1.0f }, { sequence, 8.0f }, { incClock, 7.0f }, { decClock, 8.0f }, { morph, 0.3f }, { freq, 0.5f }, { transform, 0.3f },
-    { lfoSync, 3.0f }, { lfoFreq, 0.3f }, { output, 3.0f },
+    { lfoSync, 3.0f }, { lfoFreq, 0.3f }, { output, 2.2f },
 };
 constexpr PresetValue chordGlow[] = {
     { filter, 16.0f }, { morph, 0.0f }, { freq, 0.3f }, { transform, 0.5f }, { lfoSync, 2.0f }, { lfoShape, 1.0f },

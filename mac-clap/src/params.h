@@ -19,7 +19,7 @@
 #include <strings.h>
 
 #ifndef CORTEX_VERSION
-#define CORTEX_VERSION "0.2.1"
+#define CORTEX_VERSION "0.3.1"
 #endif
 
 namespace cortex
@@ -295,7 +295,7 @@ inline bool parseParam (const Param& p, const char* text, float& v)
     }
     char* end = nullptr;
     double x = std::strtod (text, &end);
-    if (end == text)
+    if (end == text || ! std::isfinite (x)) // strtod reads "nan" and "inf": neither is a value
         return false;
     while (*end == ' ')
         ++end;

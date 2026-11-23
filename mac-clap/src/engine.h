@@ -53,6 +53,19 @@ struct PairState
     Pair ic1, ic2;
 };
 
+__attribute__ ((always_inline)) inline PairCoefs addCoefs (const PairCoefs& a, const PairCoefs& b)
+{
+    return { a.a1 + b.a1, a.a2 + b.a2, a.a3 + b.a3, a.m0 + b.m0, a.m1 + b.m1, a.m2 + b.m2 };
+}
+__attribute__ ((always_inline)) inline PairCoefs subCoefs (const PairCoefs& a, const PairCoefs& b)
+{
+    return { a.a1 - b.a1, a.a2 - b.a2, a.a3 - b.a3, a.m0 - b.m0, a.m1 - b.m1, a.m2 - b.m2 };
+}
+__attribute__ ((always_inline)) inline PairCoefs scaleCoefs (const PairCoefs& a, float s)
+{
+    return { a.a1 * s, a.a2 * s, a.a3 * s, a.m0 * s, a.m1 * s, a.m2 * s };
+}
+
 // A value from 32 bits: the same for the same cycle (S&H and Drift follow the song's place).
 inline float hashUnit (int64_t n, uint32_t axis)
 {
@@ -93,13 +106,18 @@ __attribute__ ((always_inline)) inline float saturate (float u)
     return u * (27.0f + u2) / (27.0f + 9.0f * u2);
 }
 
-// The same on both sides at once, for the filter's distortion.
-__attribute__ ((always_inline)) inline Pair saturatePair (Pair u)
+// In-filter distortion's saturator, on both sides at once: exact identity up to full scale (|u| <= 1), so signals
+// under headroom never lose level or gather cumulative fuzz across 7 bands, then a C1 soft knee asymptotically
+// approaching +/- 2.
+__attribute__ ((always_inline)) inline Pair saturateBandPair (Pair u)
 {
-    const Pair lo { -3.0f, -3.0f }, hi { 3.0f, 3.0f };
-    u = u < lo ? lo : (u > hi ? hi : u);
-    const Pair u2 = u * u;
-    return u * (27.0f + u2) / (27.0f + 9.0f * u2);
+    const Pair zero { 0.0f, 0.0f }, one { 1.0f, 1.0f }, cap { 1e15f, 1e15f };
+    const Pair a = u < zero ? -u : u;
+    const Pair ac = a < cap ? a : cap;
+    const Pair over = ac - one;
+    const Pair e = over > zero ? over : zero;
+    const Pair mag = a > one ? one + e / (one + e) : a;
+    return u < zero ? -mag : mag;
 }
 
 // The output's limit: nothing below full scale, then a soft knee to at most 2. Not a number (a broken input) is
@@ -120,7 +138,7 @@ public:
     void prepare (double sampleRate, uint32_t maxFrames)
     {
         (void) maxFrames; // the engine runs in control steps of its own, whatever the host's blocks
-        rate = (float) sampleRate;
+        rate = sampleRate >= 1000.0 && sampleRate <= 768000.0 ? (float) sampleRate : 48000.0f; // an absurd rate (0, nan) is not taken
         derive();
         reset();
     }
@@ -138,13 +156,16 @@ public:
         for (int a = 0; a < 3; ++a)
             lfoDepthNow[a] = lfoDepth[a], envDepthNow[a] = envDepth[a];
         switchGain = 1.0f, switchDir = 0;
-        env = 0.0f, envNorm = 0.0f;
+        env = 0.0f, envNorm = 0.0f, envTrigNorm = 0.0f;
         lfoCycles = 0.0;
         untilTick = 0;
         designed = false;
+        ramping = false;
+        filterGlideCoef = tickSmooth;
         songPlaying = false;
         restartSequence();
         snapFilter = true;
+        snapCoefs = true;
     }
 
     // A state loaded while running (a project opening): every glide lands on its value at once, so the sound starts
@@ -165,6 +186,9 @@ public:
                 s = PairState {};
         }
         snapFilter = true;
+        snapCoefs = true;
+        ramping = false;
+        filterGlideCoef = tickSmooth;
         switchGain = 1.0f, switchDir = 0;
     }
 
@@ -177,21 +201,21 @@ public:
             case freq: target[1] = v; break;
             case transform: target[2] = v; break;
             case emphasis: emphasisTarget = v; break;
-            case glide: glideKnob = v; break;
-            case drive: driveDb = v; break;
+            case glide: glideKnob = v, deriveGlide(); break;
+            case drive: driveDb = v, deriveDrive(); break;
             case mix: mixTarget = v; break;
-            case output: outputDb = v; break;
+            case output: outputDb = v, deriveOut(); break;
             case spread: spreadAmount = v; break;
             case lfoSync: syncIndex = std::clamp ((int) v, 0, (int) (sizeof (lfoSyncBeats) / sizeof (lfoSyncBeats[0])) - 1); break;
-            case lfoRate: lfoRateKnob = v; break;
+            case lfoRate: lfoRateKnob = v, deriveLfoStep(); break;
             case lfoShape: shape = (Shape) std::clamp ((int) v, 0, 6); break;
             case lfoPhase: phaseOffset = v; break;
             case lfoMorph: lfoDepth[0] = v; break;
             case lfoFreq: lfoDepth[1] = v; break;
             case lfoTransform: lfoDepth[2] = v; break;
-            case envGain: envGainDb = v; break;
-            case envAttack: attackKnob = v; break;
-            case envRelease: releaseKnob = v; break;
+            case envGain: envGainDb = v, deriveEnvGain(); break;
+            case envAttack: attackKnob = v, deriveAttack(); break;
+            case envRelease: releaseKnob = v, deriveRelease(); break;
             case envMorph: envDepth[0] = v; break;
             case envFreq: envDepth[1] = v; break;
             case envTransform: envDepth[2] = v; break;
@@ -213,7 +237,6 @@ public:
             case trigReset: gate (2, v); return;
             default: return; // the edit filter's fields live in the bank (bank()), not here
         }
-        derive();
     }
 
     // The host's transport at the block's start: whether it plays, the song's place in beats (if it gives one) and
@@ -223,6 +246,11 @@ public:
     // last bits depend on where the blocks fall. The song starting starts the sequence again.
     void transport (bool playing, bool placed, double beats, double bpm)
     {
+        // A hostile host's tempo or place never reaches the clocks (an infinite or absurdly large one would
+        // overflow their cell arithmetic): anything real lies well inside these (a CLAP place is at most
+        // about 4e9 beats).
+        bpm = std::isfinite (bpm) ? std::clamp (bpm, 1.0, 1000.0) : 120.0;
+        placed = placed && std::isfinite (beats) && std::fabs (beats) <= 1e12;
         const double perFrame = bpm / 60.0 / (double) rate;
         const bool now = playing && placed;
         if (now && (! songPlaying || perFrame != beatsPerFrame || std::fabs (beats - songBeatsAt (frame)) > 1e-6))
@@ -294,6 +322,9 @@ public:
         out[0] = distPeak[0], out[1] = distPeak[1];
         distPeak[0] = distPeak[1] = 0.0f;
     }
+    // Whether anyone is reading the bend meter (the page is being painted): the peaks are not tracked without a
+    // reader. They never feed the sound, so this cannot move it.
+    void bendMetering (bool on) { bendOn = on; }
 
 private:
     float rate = 48000.0f;
@@ -314,33 +345,36 @@ private:
     bool gateHigh[3] = {};
 
     // What they come to.
-    float glideCoef = 1.0f, smoothCoef = 1.0f, tickSmooth = 1.0f, lfoStep = 0.0f;
+    float glideCoef = 1.0f, smoothCoef = 1.0f, tickSmooth = 1.0f, envSmoothCoef = 1.0f, filterGlideCoef = 1.0f, lfoStep = 0.0f;
     float driveTarget = 1.0f, compTarget = 1.0f, outTarget = 1.0f, envGainLin = 1.0f, attackCoef = 1.0f, releaseCoef = 1.0f;
 
-    // The running state. A new filter comes in under a dip of the filtered sound: down over the old filter's Exit
-    // Fade (switchDir -1), the filter changed and emptied, up over the new one's Enter Fade (+1), each scaled by the
-    // sequence's Fade Time Scale.
+    // The running state. A new cube comes in under a smoothstep dip of the filtered sound: down over the old filter's
+    // Exit Fade (switchDir -1), the filter changed and emptied, up over the new one's Enter Fade (+1), each scaled by
+    // the sequence's Fade Time Scale. Switching between two slots on the same cube whose settings differ glides those
+    // settings over Enter Fade without muting or clearing the resonant state.
     int cubeIndex = 0, loadedSlot = 1, switchDir = 0;
     float switchGain = 1.0f, switchStep = 1.0f;
     float spreadNow = 0.0f, lfoDepthNow[3] = {}, envDepthNow[3] = {}, envGainNow = 1.0f; // glided as Emphasis is
     float knob[3] = { 0.0f, 0.6f, 0.3f }, emphasisNow = 0.0f;
     float mixNow = 1.0f, outNow = 1.0f, driveNow = 1.0f, compNow = 1.0f;
-    float env = 0.0f, envNorm = 0.0f;
+    float env = 0.0f, envNorm = 0.0f, envTrigNorm = 0.0f;
     double lfoCycles = 0.0;
     bool songPlaying = false, startPending = false, loadPending = true;
     double anchorBeats = 0.0, beatsPerFrame = 120.0 / 60.0 / 48000.0;
     uint64_t frame = 0, anchorFrame = 0; // frames rendered since activation; the one the song's place was taken at
     uint32_t untilTick = 0;
     double songBeatsAt (uint64_t at) const { return anchorBeats + (double) (at - anchorFrame) * beatsPerFrame; }
-    bool driving = false, distorting = false, splitNow = false, designed = false;
+    bool driving = false, distorting = false, splitNow = false, designed = false, ramping = false, snapCoefs = true, tailLpNow = false;
     Position pointL, pointR, designedL, designedR;
     int designedCube = -2;
     float designedEmphasis = 0.0f;
     Design designL, designR;
     int bandsNow = 0;
     bool pairedSplit = false; // pairs[] hold two designs (Spread) or one twice
-    PairCoefs pairs[maxBands] {};
-    Pair wetPair {}, dryPair {}, distDrive {}, distPost {}, distOn {};
+    PairCoefs pairs[maxBands] {}, pairTarget[maxBands] {}, pairStep[maxBands] {};
+    Pair wetPair {}, dryPair {}, distDrive {}, distPost {}, distSatIn { 1.0f, 1.0f }, distSatOut { 1.0f, 1.0f }, distOn {};
+    Pair wetTarget {}, dryTarget {}, distDriveTarget {}, distPostTarget {}, distSatInTarget { 1.0f, 1.0f }, distSatOutTarget { 1.0f, 1.0f };
+    Pair wetStep {}, dryStep {}, distDriveStep {}, distPostStep {};
     PairState state[maxBands] {};
 
     // The filter heard: its settings now (gliding to the bank's over 20 ms while it plays; landing at once when it
@@ -368,23 +402,34 @@ private:
 
     // The distortion's meter.
     float distPeak[2] = {};
+    bool bendOn = true; // tracked unless the plug-in says nobody is reading (bendMetering)
 
     static float onePole (float seconds, float frames, float rate) { return seconds <= 0.0f ? 1.0f : 1.0f - std::exp (-frames / (seconds * rate)); }
     template <size_t N>
     static int clockIndexOf (float v, const double (&)[N]) { return std::clamp ((int) v, 0, (int) N - 1); }
 
-    void derive()
+    // What a knob comes to, each worked out when its knob moves (still at once, in set(): the event-sliced render
+    // reads these between events of a block, so deferring them to the next tick would move the sound). Only
+    // seven knobs feed any of it; the rest of set() used to recompute all thirteen transcendentals a time.
+    void deriveGlide() { glideCoef = onePole (glideSeconds (glideKnob), (float) controlFrames, rate); }
+    void deriveLfoStep() { lfoStep = lfoHz (lfoRateKnob) * (float) controlFrames / rate; }
+    void deriveDrive()
     {
-        glideCoef = onePole (glideSeconds (glideKnob), (float) controlFrames, rate);
-        smoothCoef = onePole (0.02f, 1.0f, rate);                   // Drive, Mix, Output: 20 ms
-        tickSmooth = onePole (0.02f, (float) controlFrames, rate);  // Emphasis
-        lfoStep = lfoHz (lfoRateKnob) * (float) controlFrames / rate;
         driveTarget = std::exp2 (driveDb * dbToLog2);
         compTarget = 1.0f / std::sqrt (driveTarget);
-        outTarget = std::exp2 (outputDb * dbToLog2);
-        envGainLin = std::exp2 (envGainDb * dbToLog2);
-        attackCoef = onePole (attackSeconds (attackKnob), 1.0f, rate);
-        releaseCoef = onePole (releaseSeconds (releaseKnob), 1.0f, rate);
+    }
+    void deriveOut() { outTarget = std::exp2 (outputDb * dbToLog2); }
+    void deriveEnvGain() { envGainLin = std::exp2 (envGainDb * dbToLog2); }
+    void deriveAttack() { attackCoef = onePole (attackSeconds (attackKnob), 1.0f, rate); }
+    void deriveRelease() { releaseCoef = onePole (releaseSeconds (releaseKnob), 1.0f, rate); }
+    void derive() // all of them, at prepare
+    {
+        deriveGlide();
+        smoothCoef = onePole (0.02f, 1.0f, rate);                    // Drive, Mix, Output: 20 ms (the rate's alone)
+        tickSmooth = onePole (0.02f, (float) controlFrames, rate);   // Emphasis, depths, manual filter edits
+        envSmoothCoef = onePole (0.005f, (float) controlFrames, rate); // filters audio-rate half-wave bass ripple
+        filterGlideCoef = tickSmooth;
+        deriveLfoStep(), deriveDrive(), deriveOut(), deriveEnvGain(), deriveAttack(), deriveRelease();
     }
 
     void setClock (int c, int index)
@@ -421,6 +466,21 @@ private:
         return next == now || std::fabs (to - next) < 1e-5f ? to : next;
     }
 
+    // Whether two filter slots differ in anything beyond their cube and fade times (offsets, gains, levels, distortion).
+    bool slotSettingsDiffer (int a, int b) const
+    {
+        if (store.used (a) != store.used (b))
+            return true;
+        for (int f = fieldMorphOffset; f <= fieldTransformDist; ++f)
+        {
+            if (f == fieldEnter || f == fieldExit)
+                continue;
+            if (store.field (a, f) != store.field (b, f))
+                return true;
+        }
+        return false;
+    }
+
     // A fade's step per frame: the filter's fade (Enter or Exit) times the sequence's scale.
     float fadeStep (int slot, int field) const
     {
@@ -446,10 +506,17 @@ private:
             clockKnown[0] = clockKnown[1] = clockKnown[2] = false;
         if (envTrigMode != 0 && on)
         {
-            const float level = (trigLevelDb - envFloorDb) / -envFloorDb, again = std::max (0.0f, level - trigHysteresisDb / -envFloorDb);
-            if (envArmed && envNorm > level)
+            // The follower stalls a float's breadth under a full-scale input, so the dB norm never quite reaches 1:
+            // Trig Level's top (0 dB) is held under that stall, or it could never fire there. The stall widens as
+            // the attack coefficient shrinks (a step stops moving the float once it is under half its last bit:
+            // in the norm, about 5.4e-9 / attackCoef under full scale), so the hold-off grows with it; where the
+            // fixed 1e-4 already cleared the stall, the level is as it was.
+            const float stall = attackCoef > 0.0f ? 5.4e-9f / attackCoef : 0.0f;
+            const float level = std::min ((trigLevelDb - envFloorDb) / -envFloorDb, 1.0f - std::max (1e-4f, 2.0f * stall)),
+                        again = std::max (0.0f, level - trigHysteresisDb / -envFloorDb);
+            if (envArmed && envTrigNorm >= level)
                 ++fire[envTrigMode - 1], envArmed = false;
-            else if (! envArmed && envNorm <= again)
+            else if (! envArmed && envTrigNorm <= again)
                 envArmed = true;
         }
         for (uint32_t i = 0; i < fire[0]; ++i)
@@ -582,14 +649,27 @@ private:
     {
         untilTick = controlFrames;
 
-        // The envelope, from -48 dB to 0 dB (read only if something uses it). A broken input (not a number,
-        // infinite) has it start again from nothing.
+        // Finish any previous tick's coefficient ramp cleanly (prevents float drift while staying block-size invariant).
+        if (ramping)
+        {
+            for (int b = 0; b < bandsNow; ++b)
+                pairs[b] = pairTarget[b];
+            wetPair = wetTarget, dryPair = dryTarget;
+            distDrive = distDriveTarget, distPost = distPostTarget;
+            distSatIn = distSatInTarget, distSatOut = distSatOutTarget;
+            ramping = false;
+        }
+
+        // The envelope, from -48 dB to 0 dB (read only if something uses it). Triggers use exact linear dB so Trig
+        // Level stays calibrated; axis modulation uses a quadratic curve smoothed over 2.5 ms so quiet tails close
+        // the filter and fast bass attacks don't inject 110 Hz FM ripple into cutoff.
         if (! (env < 1e30f))
             env = 0.0f;
-        envNorm = envDepthNow[0] != 0.0f || envDepthNow[1] != 0.0f || envDepthNow[2] != 0.0f || envDepth[0] != 0.0f || envDepth[1] != 0.0f
-                          || envDepth[2] != 0.0f || envTrigMode != 0
-                    ? std::clamp ((6.0206f * std::log2 (env + 1e-12f) - envFloorDb) / -envFloorDb, 0.0f, 1.0f)
-                    : 0.0f;
+        const bool envNeeded = envDepthNow[0] != 0.0f || envDepthNow[1] != 0.0f || envDepthNow[2] != 0.0f || envDepth[0] != 0.0f
+                             || envDepth[1] != 0.0f || envDepth[2] != 0.0f || envTrigMode != 0;
+        const float envDb = envNeeded ? std::clamp ((6.0206f * std::log2 (env + 1e-12f) - envFloorDb) / -envFloorDb, 0.0f, 1.0f) : 0.0f;
+        envTrigNorm = envDb;
+        envNorm = envNeeded ? glideTo (envNorm, envDb * envDb, envSmoothCoef) : 0.0f;
         stepSequence();
 
         // The LFO's place now: the song's while it plays (synced), else counted on.
@@ -609,17 +689,27 @@ private:
         if (lfoCycles > 1e9) // a free LFO left running for years: keep the double's precision
             lfoCycles -= std::floor (lfoCycles);
 
-        // A new filter (or a new cube in the one heard): the dip down, then the change at the bottom of it (the filter
-        // emptied, so nothing rings over from the old one), then up. Before anything is heard it changes at once.
+        // A new filter (or a new cube in the one heard): if both slots share the same non-Null cube and differ in
+        // offsets/gains/levels/distortion (e.g. Acid Steps), morph smoothly over Enter Fade without dipping to silence
+        // or wiping the filter state. Otherwise dip down over Exit Fade, clear state at zero, and fade back in.
         const int slot = targetSlot(), cube = store.cubeOf (slot);
         if (slot != loadedSlot || cube != cubeIndex)
         {
-            if (! designed || switchGain <= 0.0f)
+            const bool sameCubeMorph = designed && cube == cubeIndex && cube >= 0 && switchDir == 0 && slotSettingsDiffer (loadedSlot, slot);
+            if (sameCubeMorph)
+            {
+                loadedSlot = slot;
+                const float seconds = fadeSeconds (store.field (loadedSlot, fieldEnter)) * fadeScales[seq.fade];
+                filterGlideCoef = onePole (seconds, (float) controlFrames, rate);
+            }
+            else if (! designed || switchGain <= 0.0f)
             {
                 loadedSlot = slot, cubeIndex = cube;
                 for (auto& st : state)
                     st = PairState {};
                 snapFilter = true;
+                snapCoefs = true;
+                filterGlideCoef = tickSmooth;
                 switchDir = designed ? 1 : 0;
                 switchStep = fadeStep (loadedSlot, fieldEnter);
             }
@@ -646,7 +736,7 @@ private:
         }
         if (! filterSettled)
         {
-            const float s = snapFilter ? 1.0f : tickSmooth;
+            const float s = snapFilter ? 1.0f : filterGlideCoef;
             bool landed = true;
             for (int a = 0; a < 3; ++a)
             {
@@ -659,6 +749,8 @@ private:
                 landed &= levelDbNow[c] == levelTo[c] && distDbNow[c] == distTo[c];
             }
             filterSettled = landed;
+            if (filterSettled)
+                filterGlideCoef = tickSmooth;
         }
         snapFilter = false;
 
@@ -692,14 +784,16 @@ private:
             designedR = { -1.0f, -1.0f, -1.0f }; // unused: worked out again when Spread splits the sides
         pointL = l, pointR = r;
 
-        const bool again = ! designed || designedCube != cubeIndex || designedEmphasis != emphasisNow;
+        const bool wasDesigned = designed;
+        const bool cubeChanged = designedCube != cubeIndex;
+        const bool again = ! designed || cubeChanged || designedEmphasis != emphasisNow;
         bool changed = again || splitNow != pairedSplit;
         if (cubeIndex < 0) // Null: no bands, the input as it is
         {
             if (again)
             {
                 designL = Design {};
-                designL.bands = 0, designL.wet = 1.0f, designL.dryGain = 0.0f;
+                designL.bands = 0, designL.wet = 1.0f, designL.dryGain = 0.0f, designL.gain = 1.0f, designL.parallel = 0.0f;
                 designR = designL;
             }
             designedL = l, designedR = r;
@@ -712,48 +806,103 @@ private:
             if (splitNow && (again || r != designedR))
                 design (cubeNow, r, emphasisNow, rate, designR), designedR = r, changed = true;
         }
-        if (again && designedCube != cubeIndex)
+        if (again && cubeChanged)
             for (int b = designL.bands; b < maxBands; ++b) // bands a new cube does not use start empty if it later does
                 state[b] = PairState {};
         designed = true, designedCube = cubeIndex, designedEmphasis = emphasisNow;
         const Design& dr = splitNow ? designR : designL;
         bandsNow = designL.bands;
+        tailLpNow = designL.tailLowpass;
         pairedSplit = splitNow;
         for (int b = 0; changed && b < bandsNow; ++b) // the two sides' coefficients side by side, when they moved
         {
             const BandCoefs &cl = designL.band[b], &cr = dr.band[b];
-            pairs[b] = { Pair { cl.a1, cr.a1 }, Pair { cl.a2, cr.a2 }, Pair { cl.a3, cr.a3 }, Pair { cl.m0, cr.m0 }, Pair { cl.m1, cr.m1 },
-                         Pair { cl.m2, cr.m2 } };
-        }
-        // The filter's level on each side scales its output (the bands' and its parallel dry share alike).
-        if (changed || levelDbNow[0] != levelsUsed[0] || levelDbNow[1] != levelsUsed[1])
-        {
-            const float gl = levelDbNow[0] == 0.0f ? 1.0f : std::exp2 (levelDbNow[0] * dbToLog2);
-            const float gr = levelDbNow[1] == 0.0f ? 1.0f : std::exp2 (levelDbNow[1] * dbToLog2);
-            wetPair = Pair { designL.wet * gl, dr.wet * gr }, dryPair = Pair { designL.dryGain * gl, dr.dryGain * gr };
-            levelsUsed[0] = levelDbNow[0], levelsUsed[1] = levelDbNow[1];
+            pairTarget[b] = { Pair { cl.a1, cr.a1 }, Pair { cl.a2, cr.a2 }, Pair { cl.a3, cr.a3 }, Pair { cl.m0, cr.m0 }, Pair { cl.m1, cr.m1 },
+                              Pair { cl.m2, cr.m2 } };
         }
 
-        // The distortion inside the filter: the bands' input scaled by the drive, each band's output through a
-        // saturator (its ceiling full scale), the last band's output scaled back. Under 0 dB that only sets the
-        // headroom (scaled back as much: clean until the signal inside reaches 1 / drive); over 0 dB it drives into the
-        // ceilings, scaled back by half as much (as Drive is), so more of it is grittier and a little louder, never as
-        // much louder as the drive. At -30 dB there is none.
+        // The distortion inside the filter: the cube's linear gain compensation is staged BEFORE the band chain on
+        // distorting sides so resonant cubes don't saturate prematurely at negative Dist settings or lose ceiling
+        // under post-band wet attenuation. Under 0 dB, the SVF state stays at constant scale (pre = cubeGain,
+        // post = 1) while sIn/sOut raise the saturator's knee threshold, avoiding any resonant state-gain burst when
+        // Dist falls rapidly toward -30 dB. Over 0 dB, pre drives into the saturators and post smoothly tracks the
+        // saturated ceiling down to 1/6 (-15.6 dB) so heavy drive stays audible all the way to +70 dB. At -30 dB a
+        // side passes by untouched; toggling a side on/off rescales its SVF state inversely so the switch is seamless.
         const float dbL = std::clamp (distDbNow[0] + distBy, distLowest, distHighest), dbR = std::clamp (distDbNow[1] + distBy, distLowest, distHighest);
-        if (dbL != distUsed[0] || dbR != distUsed[1] || cubeIndex != distCube)
+        const bool distDirty = changed || dbL != distUsed[0] || dbR != distUsed[1] || cubeIndex != distCube;
+        bool distToggle = false;
+        Pair toggleStateRatio { 1.0f, 1.0f };
+        if (distDirty)
         {
-            float drive[2], post[2], on[2];
+            const Pair oldOn = distOn, oldPre = distDriveTarget;
+            float pre[2], post[2], sIn[2], sOut[2], on[2], ratio[2] = { 1.0f, 1.0f };
             distorting = false;
             for (int c = 0; c < 2; ++c)
             {
                 const float db = c == 0 ? dbL : dbR;
-                on[c] = db > distLowest && cubeIndex >= 0 ? 1.0f : 0.0f; // a side at -30 dB passes it all by, untouched
-                drive[c] = on[c] != 0.0f ? std::exp2 (db * dbToLog2) : 1.0f;
-                post[c] = drive[c] < 1.0f ? 1.0f / drive[c] : (on[c] != 0.0f ? 1.0f / std::sqrt (drive[c]) : 1.0f);
+                const float cubeGain = c == 0 ? designL.gain : dr.gain;
+                on[c] = db > distLowest && cubeIndex >= 0 ? 1.0f : 0.0f;
+                const float drv = on[c] != 0.0f ? std::exp2 (db * dbToLog2) : 1.0f;
+                if (on[c] == 0.0f)
+                    pre[c] = 1.0f, post[c] = 1.0f, sIn[c] = 1.0f, sOut[c] = 1.0f;
+                else if (drv < 1.0f)
+                    pre[c] = cubeGain, post[c] = 1.0f, sIn[c] = drv, sOut[c] = 1.0f / drv;
+                else
+                    pre[c] = drv * cubeGain, post[c] = 1.0f / (1.0f + 5.0f * (drv - 1.0f) / (drv + 4.0f)), sIn[c] = 1.0f, sOut[c] = 1.0f;
+                if (on[c] != oldOn[c] && wasDesigned && ! cubeChanged && oldPre[c] > 1e-6f)
+                    ratio[c] = pre[c] / oldPre[c];
                 distorting |= on[c] != 0.0f;
             }
-            distDrive = Pair { drive[0], drive[1] }, distPost = Pair { post[0], post[1] }, distOn = Pair { on[0], on[1] };
+            distToggle = on[0] != oldOn[0] || on[1] != oldOn[1];
+            toggleStateRatio = Pair { ratio[0], ratio[1] };
+            distDriveTarget = Pair { pre[0], pre[1] }, distPostTarget = Pair { post[0], post[1] };
+            distSatInTarget = Pair { sIn[0], sIn[1] }, distSatOutTarget = Pair { sOut[0], sOut[1] };
+            distOn = Pair { on[0], on[1] };
             distUsed[0] = dbL, distUsed[1] = dbR, distCube = cubeIndex;
+        }
+        if (distToggle && wasDesigned && ! cubeChanged)
+            for (int b = 0; b < bandsNow; ++b)
+                state[b].ic1 *= toggleStateRatio, state[b].ic2 *= toggleStateRatio;
+
+        // The filter's level on each side scales its output (the bands' and its parallel dry share alike). When
+        // distortion is on for a side, design.gain was already staged in distDriveTarget before Band 0.
+        const bool gainsDirty = changed || distToggle || levelDbNow[0] != levelsUsed[0] || levelDbNow[1] != levelsUsed[1];
+        if (gainsDirty)
+        {
+            const float gl = levelDbNow[0] == 0.0f ? 1.0f : std::exp2 (levelDbNow[0] * dbToLog2);
+            const float gr = levelDbNow[1] == 0.0f ? 1.0f : std::exp2 (levelDbNow[1] * dbToLog2);
+            const float wl = distOn[0] > 0.5f ? (1.0f - designL.parallel) * gl : designL.wet * gl;
+            const float wr = distOn[1] > 0.5f ? (1.0f - dr.parallel) * gr : dr.wet * gr;
+            wetTarget = Pair { wl, wr }, dryTarget = Pair { designL.dryGain * gl, dr.dryGain * gr };
+            levelsUsed[0] = levelDbNow[0], levelsUsed[1] = levelDbNow[1];
+        }
+
+        // Interpolate SVF and gain coefficients linearly across the control tick when moving smoothly (eliminating the
+        // 6 kHz staircase without running design() every sample). Snap immediately on startup, settle(), cube change,
+        // or when a channel toggles distortion on/off (its linear gain product is continuous across the toggle).
+        const bool doSnap = snapCoefs || ! wasDesigned || cubeChanged || controlFrames <= 1;
+        snapCoefs = false;
+        distSatIn = distSatInTarget, distSatOut = distSatOutTarget;
+        if (! doSnap && (changed || gainsDirty || (distDirty && ! distToggle)))
+        {
+            constexpr float inv = 1.0f / (float) controlFrames;
+            for (int b = 0; b < bandsNow; ++b)
+                pairStep[b] = changed ? scaleCoefs (subCoefs (pairTarget[b], pairs[b]), inv) : PairCoefs {};
+            if (distToggle)
+                wetPair = wetTarget, distDrive = distDriveTarget, distPost = distPostTarget;
+            wetStep = (gainsDirty && ! distToggle) ? (wetTarget - wetPair) * inv : Pair { 0.0f, 0.0f };
+            dryStep = gainsDirty ? (dryTarget - dryPair) * inv : Pair { 0.0f, 0.0f };
+            distDriveStep = (distDirty && ! distToggle) ? (distDriveTarget - distDrive) * inv : Pair { 0.0f, 0.0f };
+            distPostStep = (distDirty && ! distToggle) ? (distPostTarget - distPost) * inv : Pair { 0.0f, 0.0f };
+            ramping = true;
+        }
+        else
+        {
+            for (int b = 0; b < bandsNow; ++b)
+                pairs[b] = pairTarget[b];
+            wetPair = wetTarget, dryPair = dryTarget;
+            distDrive = distDriveTarget, distPost = distPostTarget;
+            ramping = false;
         }
 
         // Drive and the gains: settled ones snap to their value (so 0 dB Drive is no saturator at all). A gain's
@@ -774,35 +923,52 @@ private:
     }
 
     // A control step's frames, the bands' count fixed so the loop over them unrolls and their states stay in registers.
-    template <bool drive, bool dist>
-    void runBands (const float* inL, const float* inR, float* outL, float* outR, uint32_t n)
+    template <bool drive, bool dist, bool ramp>
+    void runBandsRamped (const float* inL, const float* inR, float* outL, float* outR, uint32_t n)
     {
         switch (bandsNow)
         {
-            case 1: runFrames<drive, dist, 1> (inL, inR, outL, outR, n); break;
-            case 2: runFrames<drive, dist, 2> (inL, inR, outL, outR, n); break;
-            case 3: runFrames<drive, dist, 3> (inL, inR, outL, outR, n); break;
-            case 4: runFrames<drive, dist, 4> (inL, inR, outL, outR, n); break;
-            case 5: runFrames<drive, dist, 5> (inL, inR, outL, outR, n); break;
-            case 6: runFrames<drive, dist, 6> (inL, inR, outL, outR, n); break;
-            case 7: runFrames<drive, dist, 7> (inL, inR, outL, outR, n); break;
-            default: runFrames<drive, false, 0> (inL, inR, outL, outR, n); break;
+            case 1: runFrames<drive, dist, ramp, 1> (inL, inR, outL, outR, n); break;
+            case 2: runFrames<drive, dist, ramp, 2> (inL, inR, outL, outR, n); break;
+            case 3: runFrames<drive, dist, ramp, 3> (inL, inR, outL, outR, n); break;
+            case 4: runFrames<drive, dist, ramp, 4> (inL, inR, outL, outR, n); break;
+            case 5: runFrames<drive, dist, ramp, 5> (inL, inR, outL, outR, n); break;
+            case 6: runFrames<drive, dist, ramp, 6> (inL, inR, outL, outR, n); break;
+            case 7: runFrames<drive, dist, ramp, 7> (inL, inR, outL, outR, n); break;
+            default: runFrames<drive, false, ramp, 0> (inL, inR, outL, outR, n); break;
         }
         static_assert (maxBands == 7, "a case a band count");
+    }
+
+    template <bool drive, bool dist>
+    void runBands (const float* inL, const float* inR, float* outL, float* outR, uint32_t n)
+    {
+        if (ramping)
+            runBandsRamped<drive, dist, true> (inL, inR, outL, outR, n);
+        else
+            runBandsRamped<drive, dist, false> (inL, inR, outL, outR, n);
     }
 
     // The frames: the envelope, the gains' glides, Drive, the bands (both sides at once, morph.h's runBand on each
     // lane, each through the distortion when it is on), Mix, Output and the limit. The state is copied into locals for
     // the step so nothing is reloaded after each store to the output (which may be the input).
-    template <bool drive, bool dist, int N>
+    template <bool drive, bool dist, bool ramp, int N>
     void runFrames (const float* inL, const float* inR, float* outL, float* outR, uint32_t n)
     {
         PairCoefs c[N > 0 ? N : 1];
+        PairCoefs dc[N > 0 ? N : 1];
         PairState s[N > 0 ? N : 1];
         for (int b = 0; b < N; ++b)
+        {
             c[b] = pairs[b], s[b] = state[b];
-        const Pair wet = wetPair, dryGain = dryPair, dd = distDrive, dp = distPost, dOn = distOn;
+            if constexpr (ramp)
+                dc[b] = pairStep[b];
+        }
+        Pair wet = wetPair, dryGain = dryPair, dd = distDrive, dp = distPost;
+        const Pair dWet = wetStep, dDry = dryStep, ddd = distDriveStep, ddp = distPostStep, sIn = distSatIn, sOut = distSatOut, dOn = distOn;
+        const bool tailLp = tailLpNow;
         const float eg = envGainNow, attack = attackCoef, release = releaseCoef, smooth = smoothCoef;
+        const bool meter = bendOn;
         const float switchBy = (float) switchDir * switchStep;
         float sw = switchGain;
         const float mixTo = mixTarget, outTo = outTarget, driveTo = driveTarget, compTo = compTarget;
@@ -810,6 +976,14 @@ private:
         Pair bent { distPeak[0], distPeak[1] };
         for (uint32_t i = 0; i < n; ++i)
         {
+            if constexpr (ramp)
+            {
+                for (int b = 0; b < N; ++b)
+                    c[b] = addCoefs (c[b], dc[b]);
+                wet += dWet, dryGain += dDry;
+                if constexpr (dist)
+                    dd += ddd, dp += ddp;
+            }
             const float xl = inL[i], xr = inR[i];
             // The envelope follows the louder side.
             const float level = std::max (std::fabs (xl), std::fabs (xr)) * eg;
@@ -818,7 +992,7 @@ private:
             outAt += (outTo - outAt) * smooth;
             const Pair x { xl, xr };
             Pair in = x;
-            if (drive)
+            if constexpr (drive)
             {
                 // The saturator blends in over Drive's first 6 dB (its gain from 1 to 2), so Drive at 0 dB is the
                 // input itself and turning it up from there is smooth.
@@ -830,30 +1004,43 @@ private:
             Pair y = dist ? in * dd : in;
             for (int b = 0; b < N; ++b)
             {
-                const Pair v3 = y - s[b].ic2;
-                const Pair v1 = c[b].a1 * s[b].ic1 + c[b].a2 * v3;
-                const Pair v2 = s[b].ic2 + c[b].a2 * s[b].ic1 + c[b].a3 * v3;
-                s[b].ic1 = 2.0f * v1 - s[b].ic1;
-                s[b].ic2 = 2.0f * v2 - s[b].ic2;
-                y = c[b].m0 * y + c[b].m1 * v1 + c[b].m2 * v2;
-                if (dist)
+                y = runBandStep (c[b], s[b], y); // morph.h's band, both sides as its two lanes
+                if constexpr (dist)
                 {
-                    const Pair a = y < 0.0f ? -y : y, bentBy = a * dOn;
-                    bent = bentBy > bent ? bentBy : bent;
-                    y = dOn > 0.5f ? saturatePair (y) : y;
+                    if (b + 1 < N || ! tailLp)
+                    {
+                        const Pair u = y * sIn;
+                        if (meter)
+                        {
+                            const Pair a = u < 0.0f ? -u : u, bentBy = a * dOn;
+                            bent = bentBy > bent ? bentBy : bent;
+                        }
+                        y = dOn > 0.5f ? saturateBandPair (u) * sOut : y;
+                    }
                 }
             }
-            if (dist)
+            if constexpr (dist)
                 y = y * dp;
             sw = std::clamp (sw + switchBy, 0.0f, 1.0f);
-            y = (wet * y + dryGain * in) * sw;
+            const float swCurve = sw * sw * (3.0f - 2.0f * sw);
+            y = (wet * y + dryGain * in) * swCurve;
             const Pair o = (x * (1.0f - mixAt) + y * mixAt) * outAt;
             outL[i] = limit (o[0]);
             if (outR != nullptr)
                 outR[i] = limit (o[1]);
         }
         for (int b = 0; b < N; ++b)
+        {
             state[b] = s[b];
+            if constexpr (ramp)
+                pairs[b] = c[b];
+        }
+        if constexpr (ramp)
+        {
+            wetPair = wet, dryPair = dryGain;
+            if constexpr (dist)
+                distDrive = dd, distPost = dp;
+        }
         env = follow, mixNow = mixAt, outNow = outAt, driveNow = driveAt, compNow = compAt, switchGain = sw;
         distPeak[0] = bent[0], distPeak[1] = bent[1];
     }

@@ -14,6 +14,10 @@ set(DESKTOP_DIR "${CMAKE_SOURCE_DIR}/desktop")
 set(TARGET_NAME "CortexFilter")
 set(SLUG "cortex_filter")
 
+# The bundle's version is the plug-in's own (src/params.h), so the desktop copy never states a version it is not.
+file(STRINGS "${CMAKE_SOURCE_DIR}/src/params.h" _cortex_version_line REGEX "^#define CORTEX_VERSION \"")
+string(REGEX REPLACE "^#define CORTEX_VERSION \"(.*)\"$" "\\1" CORTEX_VERSION "${_cortex_version_line}")
+
 # Compile inner plugin DSP/screen with clap_entry renamed to hdslave_inner_clap_entry
 add_library(${SLUG}_inner OBJECT
     "${CMAKE_SOURCE_DIR}/src/cortex.cpp"

@@ -50,7 +50,7 @@ struct Plugin
     Screen screen { values, feed, engine.bank(), commands };
     std::atomic<uint64_t> outgoing { 0 };
     std::atomic<bool> paintAsked { false };
-    std::atomic<uint32_t> meterUntil { 0 }; // the page's meters are kept up until this block (about a second after a paint)
+    std::atomic<uint64_t> meterUntilFrame { 0 }; // the page's meters are kept up until this frame (a second after a paint)
     uint32_t sincePaint = 0; // frames since the audio thread last asked for a paint
     std::atomic<bool> inputSeen { false }; // an input on the page since its last paint (used or not)
     // A state's bank and sequences as loadBank() reads them, whole before any of it is used (main thread; each
@@ -471,6 +471,14 @@ bool audioGet (const clap_plugin*, uint32_t index, bool input, clap_audio_port_i
 }
 const clap_plugin_audio_ports audioExtension { audioCount, audioGet };
 
+// Latency and tail: none of the first (the answer to a sample begins on that sample; tests/engine.cpp holds it),
+// and the worst ring of the second — Bell Tower's hum at 27.5 Hz and Q 80 (full Emphasis) — measured the same
+// way there (rung up, then timed to -100 dBFS: 9.85 s from a 0.41 peak; tailSeconds covers a full-scale one).
+uint32_t latencyGet (const clap_plugin*) { return 0; }
+const clap_plugin_latency latencyExtension { latencyGet };
+uint32_t tailGet (const clap_plugin* plugin) { return (uint32_t) (tailSeconds * of (plugin).engine.sampleRate() + 0.5f); }
+const clap_plugin_tail tailExtension { tailGet };
+
 // The plug-in -------------------------------------------------------------------------------------------------
 
 bool pluginInit (const clap_plugin* plugin)
@@ -499,10 +507,13 @@ void pluginDestroy (const clap_plugin* plugin)
 
 bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t maxFrames)
 {
+    if (! (rate >= 1000.0 && rate <= 768000.0)) // no real host's rate lies outside this; the maths needs a positive one
+        return false;
     auto& p = of (plugin);
     for (uint32_t i = 0; i < paramCount; ++i) // values the host set while inactive: in place before the glides settle
         p.applied[i] = p.values[i].load (std::memory_order_relaxed), p.engine.set (paramTable[i].id, p.applied[i]);
     p.engine.prepare (rate, maxFrames);
+    p.commands.keepFor ((float) rate);
     p.feed.rate.store ((float) rate, std::memory_order_relaxed);
     p.active = true;
     invalidatePage (p);
@@ -544,13 +555,16 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     auto& p = of (plugin);
     FlushDenormals flush;
     const uint32_t frames = process->frames_count;
-    if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 1 || process->audio_outputs[0].data32 == nullptr)
+    if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 1 || process->audio_outputs[0].data32 == nullptr
+        || process->audio_outputs[0].data32[0] == nullptr
+        || (process->audio_outputs[0].channel_count > 1 && process->audio_outputs[0].data32[1] == nullptr))
         return CLAP_PROCESS_ERROR;
     float* left = process->audio_outputs[0].data32[0];
     float* right = process->audio_outputs[0].channel_count > 1 ? process->audio_outputs[0].data32[1] : nullptr;
     const float* inL = nullptr;
     const float* inR = nullptr;
-    if (process->audio_inputs_count >= 1 && process->audio_inputs[0].channel_count >= 1 && process->audio_inputs[0].data32 != nullptr)
+    if (process->audio_inputs_count >= 1 && process->audio_inputs[0].channel_count >= 1 && process->audio_inputs[0].data32 != nullptr
+        && process->audio_inputs[0].data32[0] != nullptr)
     {
         inL = process->audio_inputs[0].data32[0];
         inR = process->audio_inputs[0].channel_count > 1 ? process->audio_inputs[0].data32[1] : nullptr;
@@ -568,14 +582,15 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         p.engine.settle();
 
     // Events at the block's first frame come first, with the page's triggers and wheel (the sequencer's Inc, Dec,
-    // Reset; stepping through a sequence's filters: those given in the last half second), the transport after them.
+    // Reset; stepping through a sequence's filters: those given in the last half second of sound), the transport
+    // after them. No wall clock is read here: their freshness is counted in frames (screen.h).
     const auto* in = process->in_events;
     const uint32_t count = in != nullptr ? in->size (in) : 0;
     uint32_t next = 0;
     for (; next < count && in->get (in, next)->time == 0; ++next)
         handle (p, in->get (in, next));
     if (p.commands.waiting())
-        p.commands.take (Commands::nowMs(), [&p] (int kind, int amount) {
+        p.commands.take ([&p] (int kind, int amount) {
             if (kind == Commands::wheelKind)
                 p.engine.browse (amount);
             else
@@ -586,14 +601,16 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     {
         const bool playing = (t->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
         const bool placed = (t->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE) != 0;
-        const double bpm = (t->flags & CLAP_TRANSPORT_HAS_TEMPO) && t->tempo > 0.0 ? t->tempo : 120.0;
+        const double bpm = (t->flags & CLAP_TRANSPORT_HAS_TEMPO) && std::isfinite (t->tempo) && t->tempo > 0.0
+                               ? std::clamp (t->tempo, 1.0, 1000.0) : 120.0;
         p.engine.transport (playing, placed, placed ? (double) t->song_pos_beats / (double) CLAP_BEATTIME_FACTOR : 0.0, bpm);
     }
     else
         p.engine.transport (false, false, 0.0, 120.0);
 
     // The page's input and output meters, only while it is being painted: the loudest sample of each side.
-    const bool metering = p.feed.blocks.load (std::memory_order_relaxed) < p.meterUntil.load (std::memory_order_relaxed);
+    const bool metering = p.feed.frames.load (std::memory_order_relaxed) < p.meterUntilFrame.load (std::memory_order_relaxed);
+    p.engine.bendMetering (metering);
     auto peak = [frames] (const float* x) {
         float m = 0.0f;
         for (uint32_t i = 0; x != nullptr && i < frames; ++i)
@@ -653,6 +670,8 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
                 p.feed.meters[m].store (meters[m], std::memory_order_relaxed);
     }
     p.feed.blocks.fetch_add (1, std::memory_order_release);
+    p.feed.frames.fetch_add (frames, std::memory_order_release);
+    p.commands.tick (frames);
     if (p.hostScreen != nullptr)
     {
         p.sincePaint += frames;
@@ -697,7 +716,7 @@ bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
         drew = p.screen.paintTitleOnly (h, c->pixels, (int) c->stride);
     else if (c->whole || asked || changed || p.screen.due (h.nowMs))
     {
-        p.meterUntil.store (p.feed.blocks.load (std::memory_order_relaxed) + 400, std::memory_order_relaxed);
+        p.meterUntilFrame.store (p.feed.frames.load (std::memory_order_relaxed) + (uint64_t) p.engine.sampleRate(), std::memory_order_relaxed); // a second of frames, at any block size
         p.screen.update (h.nowMs);
         drew = p.screen.paint (h, c->pixels, (int) c->stride, c->whole);
         p.screen.drew (h);
@@ -779,6 +798,8 @@ const void* pluginExtension (const clap_plugin*, const char* id)
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &paramsExtension;
     if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &stateExtension;
     if (std::strcmp (id, CLAP_EXT_AUDIO_PORTS) == 0) return &audioExtension;
+    if (std::strcmp (id, CLAP_EXT_LATENCY) == 0) return &latencyExtension;
+    if (std::strcmp (id, CLAP_EXT_TAIL) == 0) return &tailExtension;
     if (std::strcmp (id, CLAP_EXT_PRESET_LOAD) == 0 || std::strcmp (id, CLAP_EXT_PRESET_LOAD_COMPAT) == 0) return &presetExtension;
     return nullptr;
 }
@@ -792,7 +813,7 @@ const clap_plugin_descriptor* factoryDescriptor (const clap_plugin_factory*, uin
 
 const clap_plugin* factoryCreate (const clap_plugin_factory*, const clap_host* host, const char* id)
 {
-    if (! clap_version_is_compatible (host->clap_version) || std::strcmp (id, descriptor.id) != 0)
+    if (host == nullptr || id == nullptr || ! clap_version_is_compatible (host->clap_version) || std::strcmp (id, descriptor.id) != 0)
         return nullptr;
     void* memory = ::operator new (sizeof (Plugin), std::align_val_t (64), std::nothrow);
     if (memory == nullptr)

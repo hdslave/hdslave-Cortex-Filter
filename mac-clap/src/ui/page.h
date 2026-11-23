@@ -1,6 +1,7 @@
 // hdslave's plug-in pages on Melodee's screen (melodee_screen.h): a few drawing calls, a page of parameters in
 // groups, K1-K3 cards and the controls. A plug-in derives its page from Page: its groups, how a parameter reads, and
-// the pictures only it can draw. Pure drawing and logic: no threads, no heap, nothing but the standard library; the
+// the pictures only it can draw. Drawing and logic only: no threads, nothing but the standard library, and its one
+// picture taken from the heap at its first paint (so an instance never shown does not carry 279 KB for it); the
 // plug-in calls it from the main thread. Anvil's and TB-MPC-3-P-0's page, with one addition for Cortex Filter: a picture
 // group may take the whole body (tallCustom), K1-K3 then shown as a slim strip under it.
 //
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 namespace hdui
 {
@@ -187,7 +189,10 @@ class Page
 {
     friend struct TilesAccess;
 public:
-    virtual ~Page() = default;
+    Page() = default;
+    Page (const Page&) = delete; // the picture below is the page's own
+    Page& operator= (const Page&) = delete;
+    virtual ~Page() { delete[] frame; }
 
     bool input (Key key, int amount, bool shift, Edits& out)
     {
@@ -260,6 +265,10 @@ public:
     // holds someone else's picture, so it is all drawn.
     bool paint (const Host& host, uint32_t* pixels, int stride, bool whole)
     {
+        if (frame == nullptr) // taken at the first paint (this thread, never the audio thread): an instance that is
+            frame = new (std::nothrow) uint32_t[width * height] {}; // never shown carries no picture
+        if (frame == nullptr)
+            return false;
         Raster r { frame, width };
         draw (r, host);
         // The canvas holds the last picture drawn (unless `whole`): unchanged rows compared there, not hashed.
@@ -335,7 +344,7 @@ protected:
     }
 
 private:
-    uint32_t frame[width * height] {};
+    uint32_t* frame = nullptr; // the picture drawn into, width x height: taken at the first paint, not per instance
 
     void draw (Raster& r, const Host& host)
     {

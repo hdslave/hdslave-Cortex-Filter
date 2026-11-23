@@ -1,0 +1,148 @@
+# This build's own edits to the plug-in's sources: the MPC page's K1-K3 footer and legend removed (the panel has
+# mouse and touch instead), 9-row lists with pinned tops, the "click or drag" text, and the tiles extension.
+# sync-from-mpc.sh copies ../src over src/ and applies this, so it must apply to the MPC sources cleanly.
+--- a/src/screen.h
++++ b/src/screen.h
+@@ -140,6 +140,7 @@
+ 
+ class Screen final : public hdui::Page
+ {
++    friend struct TilesAccess;
+ public:
+     // The page's own buttons on FILTER (not parameters).
+     static constexpr uint32_t copyButton = 1000, restoreButton = 1001;
+@@ -196,6 +197,11 @@
+     // The audio thread's news and the animation's step, before each paint.
+     void update (uint64_t nowMs)
+     {
++        if (nowMs == lastUpdateMs && lastUpdateMs != 0)
++        {
++            relabel();
++            return;
++        }
+         const uint32_t blocks = feed.blocks.load (std::memory_order_acquire);
+         if (blocks != seenBlocks)
+             seenBlocks = blocks, lastBlockMs = nowMs, heard = true;
+@@ -1021,7 +1027,7 @@
+         if (q == 0)
+         {
+             const char* a = "SEQUENCER OFF";
+-            const char* b = "TURN K1 TO PICK A SEQUENCE";
++            const char* b = "CLICK OR DRAG TO PICK A SEQUENCE";
+             r.text (x + (w - hdui::textWidth (a, 64, 2)) / 2, y + height / 2 - 24, a, colours.text, 64, 2);
+             r.text (x + (w - hdui::textWidth (b)) / 2, y + height / 2 + 8, b, colours.muted);
+             return;
+--- a/src/cortex.cpp
++++ b/src/cortex.cpp
+@@ -781,9 +781,20 @@
+ 
+ const clap_plugin_melodee_screen screenExtension { screenPaint, screenInput, screenKnobs };
+ 
++} // namespace
++} // namespace cortex
++
++#include "tiles.h"
++
++namespace cortex
++{
++namespace
++{
++
+ const void* pluginExtension (const clap_plugin*, const char* id)
+ {
+     if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN) == 0) return &screenExtension;
++    if (std::strcmp (id, CLAP_EXT_HDSLAVE_TILES) == 0) return &tilesExtension;
+     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &paramsExtension;
+     if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &stateExtension;
+     if (std::strcmp (id, CLAP_EXT_AUDIO_PORTS) == 0) return &audioExtension;
+--- a/src/ui/page.h
++++ b/src/ui/page.h
+@@ -187,6 +187,7 @@
+ 
+ class Page
+ {
++    friend struct TilesAccess;
+ public:
+     Page() = default;
+     Page (const Page&) = delete; // the picture below is the page's own
+@@ -313,6 +314,7 @@
+     Palette colours {};
+     int current = 0;
+     int cursor[12] {};
++    int pinnedTop = -1;
+     bool editing = false;
+ 
+     // Layout.
+@@ -378,13 +380,6 @@
+             drawCustom (r, host, 0, bodyY, width, tall ? tallH : bodyH);
+         else
+             drawList (r, host, g);
+-        // K1-K3, or the controls while Shift is held.
+-        if (host.shift)
+-            drawLegend (r, host);
+-        else if (tall)
+-            drawStrip (r, host);
+-        else
+-            drawCards (r, host);
+     }
+ 
+     void drawList (Raster& r, const Host& host, const Group& g)
+@@ -392,39 +387,44 @@
+         const Palette& c = colours;
+         const Ink hi = accent (host);
+         const int row = cursor[current];
+-        const int top = std::clamp (row - 3, 0, std::max (0, g.count - rows));
+-        for (int i = 0; i < rows && top + i < g.count; ++i)
++        const int visRows = g.count >= 9 ? 9 : rows;
++        const int rh = pinnedTop >= 0 ? (g.count >= 9 ? 16 : 17) : (g.count >= 9 ? 11 : rowH);
++        const int pH = pinnedTop >= 0 ? tallH : bodyH;
++        const int top = pinnedTop >= 0 ? std::clamp (pinnedTop, 0, std::max (0, g.count - visRows))
++                                       : std::clamp (row - 3, 0, std::max (0, g.count - visRows));
++        for (int i = 0; i < visRows && top + i < g.count; ++i)
+         {
+             const Field& f = g.fields[top + i];
+             Value v;
+             read (f.id, v);
+-            const int y = bodyY + i * rowH;
++            const int y = bodyY + i * rh;
+             const bool at = top + i == row, k = top + i > row && top + i <= row + 2;
+             if (at)
+             {
+-                r.box (0, y, listW, rowH, c.card);
+-                r.box (0, y, 3, rowH, hi);
++                r.box (0, y, listW, rh, c.card);
++                r.box (0, y, 3, rh, hi);
+             }
+             else if (k)
+-                r.box (0, y, 2, rowH, mix (c.bg, hi, 90));
+-            r.text (7, y + 1, f.label, at ? c.text : c.muted, 11);
++                r.box (0, y, 2, rh, mix (c.bg, hi, 90));
++            const int ty = y + (rh >= 13 ? 1 : 0);
++            r.text (7, ty, f.label, at ? c.text : c.muted, 11);
+             const bool edit = at && editing;
+             const int room = std::clamp ((150 - 14 - textWidth (f.label, 11)) / font::glyphWidth, 4, 12); // characters
+             const int vw = textWidth (v.text, room);
+             if (edit)
+-                r.frame (150 - vw - 3, y, vw + 6, rowH, hi);
+-            r.text (150 - vw, y + 1, v.text, edit ? hi : (at ? c.text : c.muted), room);
++                r.frame (150 - vw - 3, y, vw + 6, rh, hi);
++            r.text (150 - vw, ty, v.text, edit ? hi : (at ? c.text : c.muted), room);
+             if (v.kind != Kind::button)
+-                drawBar (r, 157, y + 6, 26, v, at ? hi : c.muted, c.rule);
++                drawBar (r, 157, y + rh / 2, 26, v, at ? hi : c.muted, c.rule);
+             else
+-                r.frame (158, y + 2, 24, 9, at ? hi : c.rule);
++                r.frame (158, y + 1, 24, rh - 2, at ? hi : c.rule);
+         }
+-        if (g.count > rows) // where the list is
++        if (g.count > visRows) // where the list is
+         {
+-            const int h = bodyH * rows / g.count, y = bodyY + (bodyH - h) * top / std::max (1, g.count - rows);
++            const int h = pH * visRows / g.count, y = bodyY + (pH - h) * top / std::max (1, g.count - visRows);
+             r.box (listW + 1, y, 1, h, c.rule);
+         }
+-        drawPanel (r, host, listW + 6, bodyY, width - listW - 8, bodyH);
++        drawPanel (r, host, listW + 6, bodyY, width - listW - 8, pH);
+     }
+ 
+     // A shallow chamfer catches the light at the end of each control panel.
