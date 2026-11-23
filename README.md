@@ -12,6 +12,10 @@ Since 0.2.0 it brings the full module workflow to the MPC: each **filter** in th
 
 Under **hdslaveOS**, Cortex Filter renders a live rotating 3D cube, a 3D frequency-response waterfall, axis/level meters, and dedicated filter-editing and sequence-programming pages (see [The screen](#the-screen)).
 
+**Version 0.2.2** fixes the envelope trigger at Trig Level 0 dB (it could never fire there), reports its (zero)
+latency and its measured 11-second tail to hosts that ask, and keeps page presses made while the sound sleeps.
+The sound is otherwise 0.2.1's to the bit.
+
 ## Signal flow
 
 ```
@@ -69,7 +73,9 @@ saved state (a project opening) lands at once, so it starts sounding as it was s
 A filter is a cube and the settings the module keeps with it. The bank holds 64 (F01 – F64): F01 – F16 are the
 sixteen cubes as they are, F17 – F32 the factory's ways of using them (below), F33 – F64 empty for your own. An empty
 filter is heard as Null. The **Edit Filter** controls show and change the filter **Filter** picks; choosing another
-filter shows its settings. The bank, and every change to it, is saved with the project.
+filter shows its settings. The bank, and every change to it, is saved with the project. Mind that in a desktop host:
+the Edit Filter controls are ordinary automatable parameters, so automating one permanently rewrites that filter in
+the bank (as turning the module's own controls would), and the rewritten filter is what the project saves.
 
 | Control | Range | What it does |
 |---|---|---|
@@ -250,8 +256,8 @@ instruction a cycle):
 | Case | Instructions | Share of one A55 core |
 |---|---|---|
 | Worst: a seven-band cube, both sides apart, a fast LFO on all three axes, the envelope, Drive | about 102,000 | 2.1 % |
-| The same with the filter's distortion on both sides | about 129,000 | 2.7 % |
-| The same distorted, Acid Steps stepping every sixteenth | about 78,000 | 1.6 % |
+| The same with the filter's distortion on both sides | about 123,000 | 2.6 % |
+| The same distorted, Acid Steps stepping every sixteenth | about 74,000 | 1.5 % |
 | Typical: a five-band cube moved by the LFO | about 43,000 | 0.9 % |
 | Standing still | about 39,000 | 0.8 % |
 
@@ -278,6 +284,7 @@ Needs Docker with a Linux arm64 context (Melodee's `colima-melodee` and its `mel
 ```sh
 ./build.sh          # build/CortexFilter.clap, then the tests, the sound's fingerprint, demo renders and screen pictures
 ./build.sh bench    # build/bench
+./build.sh sanitize # the tests and fingerprint scenarios under AddressSanitizer and UBSan
 tools/bench.sh      # instruction counts (Melodee's melodee-profiler image)
 tools/levels.sh     # each cube's corner levels and loudest peak
 tools/balance.sh    # how loud the presets, cubes, Emphasis and Drive are against the dry input
