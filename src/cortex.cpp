@@ -471,6 +471,14 @@ bool audioGet (const clap_plugin*, uint32_t index, bool input, clap_audio_port_i
 }
 const clap_plugin_audio_ports audioExtension { audioCount, audioGet };
 
+// Latency and tail: none of the first (the answer to a sample begins on that sample; tests/engine.cpp holds it),
+// and the worst ring of the second — Bell Tower's hum at 27.5 Hz and Q 80 (full Emphasis) — measured the same
+// way there (rung up, then timed to -100 dBFS: 9.85 s from a 0.41 peak; tailSeconds covers a full-scale one).
+uint32_t latencyGet (const clap_plugin*) { return 0; }
+const clap_plugin_latency latencyExtension { latencyGet };
+uint32_t tailGet (const clap_plugin* plugin) { return (uint32_t) (tailSeconds * of (plugin).engine.sampleRate() + 0.5f); }
+const clap_plugin_tail tailExtension { tailGet };
+
 // The plug-in -------------------------------------------------------------------------------------------------
 
 bool pluginInit (const clap_plugin* plugin)
@@ -776,6 +784,8 @@ const void* pluginExtension (const clap_plugin*, const char* id)
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &paramsExtension;
     if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &stateExtension;
     if (std::strcmp (id, CLAP_EXT_AUDIO_PORTS) == 0) return &audioExtension;
+    if (std::strcmp (id, CLAP_EXT_LATENCY) == 0) return &latencyExtension;
+    if (std::strcmp (id, CLAP_EXT_TAIL) == 0) return &tailExtension;
     if (std::strcmp (id, CLAP_EXT_PRESET_LOAD) == 0 || std::strcmp (id, CLAP_EXT_PRESET_LOAD_COMPAT) == 0) return &presetExtension;
     return nullptr;
 }

@@ -1103,6 +1103,62 @@ void testScreen (const std::string& folder)
 }
 } // namespace
 
+// The latency and tail the plug-in reports (measured in tests/engine.cpp), an absurd rate refused at activate,
+// and a state loaded while the plug-in is deactivated — asleep, as after the host's idle gate — then played: it
+// sounds from its first block as it was saved, the same to the bit as one loaded into a fresh instance, with
+// nothing of what rang before the sleep.
+void testLatencyTailAndSleep()
+{
+    {
+        Instance a;
+        const auto* latency = static_cast<const clap_plugin_latency*> (a.plugin->get_extension (a.plugin, CLAP_EXT_LATENCY));
+        const auto* tail = static_cast<const clap_plugin_tail*> (a.plugin->get_extension (a.plugin, CLAP_EXT_TAIL));
+        CHECK (latency != nullptr && latency->get (a.plugin) == 0);
+        CHECK (tail != nullptr && tail->get (a.plugin) == (uint32_t) (cortex::tailSeconds * 48000.0f + 0.5f));
+    }
+    {
+        Instance a (44100.0);
+        const auto* tail = static_cast<const clap_plugin_tail*> (a.plugin->get_extension (a.plugin, CLAP_EXT_TAIL));
+        CHECK (tail != nullptr && tail->get (a.plugin) == (uint32_t) (cortex::tailSeconds * 44100.0f + 0.5f));
+    }
+    {
+        const auto* d = factory->get_plugin_descriptor (factory, 0);
+        const clap_plugin* p = factory->create_plugin (factory, &host, d->id);
+        CHECK (p != nullptr && p->init (p));
+        CHECK (! p->activate (p, 0.0, 1, 4096) && ! p->activate (p, std::numeric_limits<double>::quiet_NaN(), 1, 4096)
+               && ! p->activate (p, 1e12, 1, 4096));
+        CHECK (p->activate (p, 48000.0, 1, 4096));
+        p->deactivate (p);
+        p->destroy (p);
+    }
+    Memory saved;
+    {
+        Instance a;
+        a.setup ({ { "Glide", 1.0 }, { "Morph", 0.8 }, { "Freq", 0.1 }, { "Filter", 8 }, { "Output", -12.0 }, { "Emphasis", 1.0 } }, 0.01);
+        CHECK (a.state->save (a.plugin, &saved.out));
+    }
+    const Stereo x = loop (48000.0, 1.0);
+    Instance asleep;
+    asleep.setup ({ { "Filter", 8 }, { "Emphasis", 1.0 }, { "Freq", 0.0 } }, 0.01);
+    asleep.run (x, 128); // rung up, then put to sleep
+    asleep.plugin->stop_processing (asleep.plugin);
+    asleep.plugin->deactivate (asleep.plugin);
+    Memory intoAsleep;
+    intoAsleep.bytes = saved.bytes;
+    CHECK (asleep.state->load (asleep.plugin, &intoAsleep.in));
+    CHECK (asleep.plugin->activate (asleep.plugin, 48000.0, 1, 4096) && asleep.plugin->start_processing (asleep.plugin));
+    const Stereo woke = asleep.run (x, 128);
+    Instance fresh;
+    fresh.plugin->stop_processing (fresh.plugin);
+    fresh.plugin->deactivate (fresh.plugin);
+    Memory intoFresh;
+    intoFresh.bytes = saved.bytes;
+    CHECK (fresh.state->load (fresh.plugin, &intoFresh.in));
+    CHECK (fresh.plugin->activate (fresh.plugin, 48000.0, 1, 4096) && fresh.plugin->start_processing (fresh.plugin));
+    const Stereo expected = fresh.run (x, 128);
+    CHECK (woke.l == expected.l && woke.r == expected.r);
+}
+
 int main (int argc, char** argv)
 {
     if (argc < 3)
@@ -1135,6 +1191,7 @@ int main (int argc, char** argv)
     testExtremes();
     testSequencerGaps();
     testPagePresses();
+    testLatencyTailAndSleep();
     demos (folder);
     testScreen (folder);
     entry->deinit();
