@@ -192,16 +192,19 @@ inline void design (const CubeTable& c, const Position& p, float emphasis, float
     d.dryGain = gain * parallel;
 }
 
-// One sample through one band.
-__attribute__ ((always_inline)) inline float runBand (const BandCoefs& c, BandState& s, float x)
+// One sample through one band, on a lane of any width (a float here, engine.h's stereo pair in the sound):
+// the one place the recurrence is written, so what the tests measure and what is heard cannot drift apart.
+template <typename Coefs, typename State, typename Lane>
+__attribute__ ((always_inline)) inline Lane runBandStep (const Coefs& c, State& s, Lane x)
 {
-    const float v3 = x - s.ic2;
-    const float v1 = c.a1 * s.ic1 + c.a2 * v3;
-    const float v2 = s.ic2 + c.a2 * s.ic1 + c.a3 * v3;
+    const Lane v3 = x - s.ic2;
+    const Lane v1 = c.a1 * s.ic1 + c.a2 * v3;
+    const Lane v2 = s.ic2 + c.a2 * s.ic1 + c.a3 * v3;
     s.ic1 = 2.0f * v1 - s.ic1;
     s.ic2 = 2.0f * v2 - s.ic2;
     return c.m0 * x + c.m1 * v1 + c.m2 * v2;
 }
+__attribute__ ((always_inline)) inline float runBand (const BandCoefs& c, BandState& s, float x) { return runBandStep (c, s, x); }
 
 // The filter's gain at a frequency whose tan(pi f / rate) is `t`, in dB (down to -200). Each band is the analog
 // prototype at s = j t / g, which is what the trapezoidal filter is.

@@ -849,12 +849,7 @@ private:
             Pair y = dist ? in * dd : in;
             for (int b = 0; b < N; ++b)
             {
-                const Pair v3 = y - s[b].ic2;
-                const Pair v1 = c[b].a1 * s[b].ic1 + c[b].a2 * v3;
-                const Pair v2 = s[b].ic2 + c[b].a2 * s[b].ic1 + c[b].a3 * v3;
-                s[b].ic1 = 2.0f * v1 - s[b].ic1;
-                s[b].ic2 = 2.0f * v2 - s[b].ic2;
-                y = c[b].m0 * y + c[b].m1 * v1 + c[b].m2 * v2;
+                y = runBandStep (c[b], s[b], y); // morph.h's band, both sides as its two lanes
                 if (dist)
                 {
                     if (meter)
