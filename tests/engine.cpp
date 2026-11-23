@@ -1052,6 +1052,147 @@ void testTextEdges()
     }
 }
 
+// The verified review fixes: Trig Level at its 0 dB end, hostile tempo/rate/text, and the behaviour the reviews
+// found untested (a third filter chosen mid-dip; Mix 0 over a broken input), plus the measured latency and tail
+// the CLAP extensions report.
+void testVerifiedFixes()
+{
+    // Trig Level at 0 dB: a full-scale burst fires one Inc a burst (the envelope's norm reaches exactly 1 there).
+    {
+        Song s;
+        s.playing = false;
+        program (s.e.bank(), 9, { 1, 2, 3, 4, 5 });
+        s.e.set (ParamId::sequence, 9), s.e.set (ParamId::envTrigger, 1), s.e.set (ParamId::trigLevel, 0.0f);
+        s.e.set (ParamId::envAttack, attackKnob (0.001f)), s.e.set (ParamId::envRelease, releaseKnob (0.02f));
+        s.e.reset();
+        for (int burst = 0; burst < 3; ++burst)
+        {
+            s.level (1.0f);
+            s.run (4800);
+            s.level (0.0f);
+            s.run (9600);
+        }
+        CHECK (s.e.sequencer().pos == 3);
+        // The slowest attack stalls the follower furthest under full scale: it fires there too.
+        s.e.set (ParamId::envAttack, attackKnob (0.2f));
+        s.e.reset();
+        for (int burst = 0; burst < 2; ++burst)
+        {
+            s.level (1.0f);
+            s.run (48000 * 4); // long enough for a 200 ms attack to settle under full scale, where it stalls
+            s.level (0.0f);
+            s.run (48000);
+        }
+        CHECK (s.e.sequencer().pos == 2);
+    }
+    // Text that is not a finite number is refused, not clamped to the knob's end.
+    {
+        float v = 0.0f;
+        const Param& drive = paramTable[paramIndex (ParamId::drive)];
+        CHECK (! parseParam (drive, "nan", v) && ! parseParam (drive, "inf", v) && ! parseParam (drive, "-inf", v));
+        CHECK (parseParam (drive, "12", v) && v == 12.0f);
+    }
+    // A hostile tempo never reaches the clocks or the LFO: rendered blocks stay finite and terminate.
+    {
+        Engine e;
+        e.prepare (48000.0, 128);
+        e.set (ParamId::sequence, 1), e.set (ParamId::lfoSync, 4);
+        float in[128] = {}, outL[128], outR[128];
+        for (double bpm : { 1e300, 1.0 / 0.0, 0.0 / 0.0, -5.0, 0.0 })
+        {
+            for (int b = 0; b < 8; ++b)
+            {
+                e.transport (true, true, b * 0.25, bpm);
+                e.render (in, in, outL, outR, 128);
+            }
+            CHECK (std::isfinite (e.lfoPlace()) && std::isfinite (outL[0] + outR[127]));
+        }
+    }
+    // An absurd sample rate is not taken: the engine keeps a sane rate and renders finite sound.
+    for (double bad : { 0.0, -48000.0, 1.0 / 0.0, 0.0 / 0.0, 1e12 })
+    {
+        Engine e;
+        e.prepare (bad, 128);
+        float in[128] = {}, outL[128], outR[128];
+        in[0] = 1.0f;
+        e.render (in, in, outL, outR, 128);
+        CHECK (e.sampleRate() == 48000.0f && std::isfinite (outL[0] + outR[127]));
+    }
+    // A third filter picked while the dip to the second is still falling: the newest one is what comes in at the
+    // bottom (with its own Enter Fade), and the sound returns in full.
+    {
+        Song s;
+        s.playing = false;
+        Store& st = s.e.bank();
+        nullFilter (st, 40, 0.003f, 0.2f), nullFilter (st, 41, 0.003f, 0.003f), nullFilter (st, 42, 0.003f, 0.003f);
+        s.e.set (ParamId::filter, 40);
+        s.e.reset();
+        s.level (0.5f);
+        s.run (4800);
+        s.e.set (ParamId::filter, 41);
+        s.run (2400); // halfway down 40's 0.2 s Exit
+        s.e.set (ParamId::filter, 42);
+        std::vector<float> out;
+        s.run (48000, &out);
+        CHECK (s.e.slotNow() == 42);
+        CHECK (out.back() == 0.5f);
+    }
+    // Mix 0 over a broken input: nothing not-a-number or past the limit's ceiling comes out.
+    {
+        Engine e;
+        e.prepare (48000.0, 128);
+        e.set (ParamId::mix, 0.0f);
+        e.reset();
+        float inL[128], inR[128], outL[128], outR[128];
+        for (int i = 0; i < 128; ++i)
+            inL[i] = inR[i] = i % 4 == 0 ? 1.0f / 0.0f : (i % 4 == 1 ? 0.0f / 0.0f : (i % 4 == 2 ? -1.0f / 0.0f : 1e30f));
+        e.render (inL, inR, outL, outR, 128);
+        bool ok = true;
+        for (int i = 0; i < 128; ++i)
+            ok &= std::isfinite (outL[i]) && std::fabs (outL[i]) <= 2.0f && std::isfinite (outR[i]);
+        CHECK (ok);
+    }
+    // Latency is truly none: an impulse's answer starts on its own sample.
+    {
+        Engine e;
+        e.prepare (48000.0, 128);
+        e.reset();
+        float in[128] = {}, outL[128], outR[128];
+        in[0] = 1.0f;
+        e.render (in, in, outL, outR, 128);
+        CHECK (outL[0] != 0.0f);
+    }
+    // The reported tail covers the longest ring: Bell Tower's hum (27.5 Hz, Q 80 at full Emphasis), rung up with a
+    // sine at its own frequency, then let go. Measured here; tailSeconds must cover it, and not by much.
+    {
+        Design d;
+        design (cubeTable (7), { 1.0f, 0.0f, 0.0f }, 1.0f, 48000.0f, d);
+        BandState st[maxBands] {};
+        const double w = 2.0 * pi * 27.5 / 48000.0;
+        for (long n = 0; n < 48000 * 8; ++n)
+        {
+            float y = 0.25f * (float) std::sin (w * (double) n);
+            const float in = y;
+            for (int b = 0; b < d.bands; ++b)
+                y = runBand (d.band[b], st[b], y);
+            y = d.wet * y + d.dryGain * in;
+            (void) y;
+        }
+        long last = 0;
+        for (long n = 0; n < 48000 * 20; ++n)
+        {
+            float y = 0.0f;
+            for (int b = 0; b < d.bands; ++b)
+                y = runBand (d.band[b], st[b], y);
+            if (std::fabs (d.wet * y) >= 1e-5f)
+                last = n;
+        }
+        const double rings = last / 48000.0;
+        std::printf ("  worst ring: %.2f s of the %.1f s tail reported\n", rings, (double) tailSeconds);
+        CHECK (rings > 9.0 && rings <= tailSeconds);
+    }
+}
+
 void testPresets()
 {
     for (const auto& p : presetTable)
@@ -1081,6 +1222,7 @@ int main()
     testClockGaps();
     testFilterSettings();
     testTextEdges();
+    testVerifiedFixes();
     testPresets();
     std::printf ("engine: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

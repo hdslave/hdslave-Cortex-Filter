@@ -295,7 +295,7 @@ inline bool parseParam (const Param& p, const char* text, float& v)
     }
     char* end = nullptr;
     double x = std::strtod (text, &end);
-    if (end == text)
+    if (end == text || ! std::isfinite (x)) // strtod reads "nan" and "inf": neither is a value
         return false;
     while (*end == ' ')
         ++end;

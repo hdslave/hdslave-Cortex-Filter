@@ -217,6 +217,10 @@ inline float responseDbAt (const Design& d, double t)
     return (float) (10.0 * std::log10 (re * re + im * im + 1e-20));
 }
 
+// How long the longest ring lasts: Bell Tower's hum at 27.5 Hz and Q 80 (full Emphasis), measured in
+// tests/engine.cpp by ringing it up and timing its fall to -100 dBFS. Reported to hosts as the tail.
+constexpr float tailSeconds = 11.0f;
+
 // The same at `hz`.
 inline double tanOf (float hz, float rate) { return std::tan ((double) pi * std::min ((double) hz, 0.4999 * rate) / rate); }
 inline float responseDb (const Design& d, float hz, float rate) { return responseDbAt (d, tanOf (hz, rate)); }

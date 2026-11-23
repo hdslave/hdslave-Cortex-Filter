@@ -120,7 +120,7 @@ public:
     void prepare (double sampleRate, uint32_t maxFrames)
     {
         (void) maxFrames; // the engine runs in control steps of its own, whatever the host's blocks
-        rate = (float) sampleRate;
+        rate = sampleRate >= 1000.0 && sampleRate <= 768000.0 ? (float) sampleRate : 48000.0f; // an absurd rate (0, nan) is not taken
         derive();
         reset();
     }
@@ -223,6 +223,10 @@ public:
     // last bits depend on where the blocks fall. The song starting starts the sequence again.
     void transport (bool playing, bool placed, double beats, double bpm)
     {
+        // A hostile host's tempo or place never reaches the clocks (an infinite one would make their cell
+        // arithmetic undefined): anything real lies well inside these.
+        bpm = std::isfinite (bpm) ? std::clamp (bpm, 1.0, 1000.0) : 120.0;
+        placed = placed && std::isfinite (beats);
         const double perFrame = bpm / 60.0 / (double) rate;
         const bool now = playing && placed;
         if (now && (! songPlaying || perFrame != beatsPerFrame || std::fabs (beats - songBeatsAt (frame)) > 1e-6))
@@ -446,8 +450,11 @@ private:
             clockKnown[0] = clockKnown[1] = clockKnown[2] = false;
         if (envTrigMode != 0 && on)
         {
-            const float level = (trigLevelDb - envFloorDb) / -envFloorDb, again = std::max (0.0f, level - trigHysteresisDb / -envFloorDb);
-            if (envArmed && envNorm > level)
+            // The follower stalls a float's breadth under a full-scale input, so the norm never quite reaches 1:
+            // Trig Level's top (0 dB) is held that much under it, or it could never fire there.
+            const float level = std::min ((trigLevelDb - envFloorDb) / -envFloorDb, 1.0f - 1e-4f),
+                        again = std::max (0.0f, level - trigHysteresisDb / -envFloorDb);
+            if (envArmed && envNorm >= level)
                 ++fire[envTrigMode - 1], envArmed = false;
             else if (! envArmed && envNorm <= again)
                 envArmed = true;

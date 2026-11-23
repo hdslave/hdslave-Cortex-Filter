@@ -499,6 +499,8 @@ void pluginDestroy (const clap_plugin* plugin)
 
 bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t maxFrames)
 {
+    if (! (rate >= 1000.0 && rate <= 768000.0)) // no real host's rate lies outside this; the maths needs a positive one
+        return false;
     auto& p = of (plugin);
     for (uint32_t i = 0; i < paramCount; ++i) // values the host set while inactive: in place before the glides settle
         p.applied[i] = p.values[i].load (std::memory_order_relaxed), p.engine.set (paramTable[i].id, p.applied[i]);
@@ -544,13 +546,16 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     auto& p = of (plugin);
     FlushDenormals flush;
     const uint32_t frames = process->frames_count;
-    if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 1 || process->audio_outputs[0].data32 == nullptr)
+    if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 1 || process->audio_outputs[0].data32 == nullptr
+        || process->audio_outputs[0].data32[0] == nullptr
+        || (process->audio_outputs[0].channel_count > 1 && process->audio_outputs[0].data32[1] == nullptr))
         return CLAP_PROCESS_ERROR;
     float* left = process->audio_outputs[0].data32[0];
     float* right = process->audio_outputs[0].channel_count > 1 ? process->audio_outputs[0].data32[1] : nullptr;
     const float* inL = nullptr;
     const float* inR = nullptr;
-    if (process->audio_inputs_count >= 1 && process->audio_inputs[0].channel_count >= 1 && process->audio_inputs[0].data32 != nullptr)
+    if (process->audio_inputs_count >= 1 && process->audio_inputs[0].channel_count >= 1 && process->audio_inputs[0].data32 != nullptr
+        && process->audio_inputs[0].data32[0] != nullptr)
     {
         inL = process->audio_inputs[0].data32[0];
         inR = process->audio_inputs[0].channel_count > 1 ? process->audio_inputs[0].data32[1] : nullptr;
@@ -586,7 +591,8 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     {
         const bool playing = (t->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
         const bool placed = (t->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE) != 0;
-        const double bpm = (t->flags & CLAP_TRANSPORT_HAS_TEMPO) && t->tempo > 0.0 ? t->tempo : 120.0;
+        const double bpm = (t->flags & CLAP_TRANSPORT_HAS_TEMPO) && std::isfinite (t->tempo) && t->tempo > 0.0
+                               ? std::clamp (t->tempo, 1.0, 1000.0) : 120.0;
         p.engine.transport (playing, placed, placed ? (double) t->song_pos_beats / (double) CLAP_BEATTIME_FACTOR : 0.0, bpm);
     }
     else
@@ -781,7 +787,7 @@ const clap_plugin_descriptor* factoryDescriptor (const clap_plugin_factory*, uin
 
 const clap_plugin* factoryCreate (const clap_plugin_factory*, const clap_host* host, const char* id)
 {
-    if (! clap_version_is_compatible (host->clap_version) || std::strcmp (id, descriptor.id) != 0)
+    if (host == nullptr || id == nullptr || ! clap_version_is_compatible (host->clap_version) || std::strcmp (id, descriptor.id) != 0)
         return nullptr;
     void* memory = ::operator new (sizeof (Plugin), std::align_val_t (64), std::nothrow);
     if (memory == nullptr)
