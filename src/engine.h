@@ -177,21 +177,21 @@ public:
             case freq: target[1] = v; break;
             case transform: target[2] = v; break;
             case emphasis: emphasisTarget = v; break;
-            case glide: glideKnob = v; break;
-            case drive: driveDb = v; break;
+            case glide: glideKnob = v, deriveGlide(); break;
+            case drive: driveDb = v, deriveDrive(); break;
             case mix: mixTarget = v; break;
-            case output: outputDb = v; break;
+            case output: outputDb = v, deriveOut(); break;
             case spread: spreadAmount = v; break;
             case lfoSync: syncIndex = std::clamp ((int) v, 0, (int) (sizeof (lfoSyncBeats) / sizeof (lfoSyncBeats[0])) - 1); break;
-            case lfoRate: lfoRateKnob = v; break;
+            case lfoRate: lfoRateKnob = v, deriveLfoStep(); break;
             case lfoShape: shape = (Shape) std::clamp ((int) v, 0, 6); break;
             case lfoPhase: phaseOffset = v; break;
             case lfoMorph: lfoDepth[0] = v; break;
             case lfoFreq: lfoDepth[1] = v; break;
             case lfoTransform: lfoDepth[2] = v; break;
-            case envGain: envGainDb = v; break;
-            case envAttack: attackKnob = v; break;
-            case envRelease: releaseKnob = v; break;
+            case envGain: envGainDb = v, deriveEnvGain(); break;
+            case envAttack: attackKnob = v, deriveAttack(); break;
+            case envRelease: releaseKnob = v, deriveRelease(); break;
             case envMorph: envDepth[0] = v; break;
             case envFreq: envDepth[1] = v; break;
             case envTransform: envDepth[2] = v; break;
@@ -213,7 +213,6 @@ public:
             case trigReset: gate (2, v); return;
             default: return; // the edit filter's fields live in the bank (bank()), not here
         }
-        derive();
     }
 
     // The host's transport at the block's start: whether it plays, the song's place in beats (if it gives one) and
@@ -298,6 +297,9 @@ public:
         out[0] = distPeak[0], out[1] = distPeak[1];
         distPeak[0] = distPeak[1] = 0.0f;
     }
+    // Whether anyone is reading the bend meter (the page is being painted): the peaks are not tracked without a
+    // reader. They never feed the sound, so this cannot move it.
+    void bendMetering (bool on) { bendOn = on; }
 
 private:
     float rate = 48000.0f;
@@ -372,23 +374,32 @@ private:
 
     // The distortion's meter.
     float distPeak[2] = {};
+    bool bendOn = true; // tracked unless the plug-in says nobody is reading (bendMetering)
 
     static float onePole (float seconds, float frames, float rate) { return seconds <= 0.0f ? 1.0f : 1.0f - std::exp (-frames / (seconds * rate)); }
     template <size_t N>
     static int clockIndexOf (float v, const double (&)[N]) { return std::clamp ((int) v, 0, (int) N - 1); }
 
-    void derive()
+    // What a knob comes to, each worked out when its knob moves (still at once, in set(): the event-sliced render
+    // reads these between events of a block, so deferring them to the next tick would move the sound). Only
+    // seven knobs feed any of it; the rest of set() used to recompute all thirteen transcendentals a time.
+    void deriveGlide() { glideCoef = onePole (glideSeconds (glideKnob), (float) controlFrames, rate); }
+    void deriveLfoStep() { lfoStep = lfoHz (lfoRateKnob) * (float) controlFrames / rate; }
+    void deriveDrive()
     {
-        glideCoef = onePole (glideSeconds (glideKnob), (float) controlFrames, rate);
-        smoothCoef = onePole (0.02f, 1.0f, rate);                   // Drive, Mix, Output: 20 ms
-        tickSmooth = onePole (0.02f, (float) controlFrames, rate);  // Emphasis
-        lfoStep = lfoHz (lfoRateKnob) * (float) controlFrames / rate;
         driveTarget = std::exp2 (driveDb * dbToLog2);
         compTarget = 1.0f / std::sqrt (driveTarget);
-        outTarget = std::exp2 (outputDb * dbToLog2);
-        envGainLin = std::exp2 (envGainDb * dbToLog2);
-        attackCoef = onePole (attackSeconds (attackKnob), 1.0f, rate);
-        releaseCoef = onePole (releaseSeconds (releaseKnob), 1.0f, rate);
+    }
+    void deriveOut() { outTarget = std::exp2 (outputDb * dbToLog2); }
+    void deriveEnvGain() { envGainLin = std::exp2 (envGainDb * dbToLog2); }
+    void deriveAttack() { attackCoef = onePole (attackSeconds (attackKnob), 1.0f, rate); }
+    void deriveRelease() { releaseCoef = onePole (releaseSeconds (releaseKnob), 1.0f, rate); }
+    void derive() // all of them, at prepare
+    {
+        deriveGlide();
+        smoothCoef = onePole (0.02f, 1.0f, rate);                   // Drive, Mix, Output: 20 ms (the rate's alone)
+        tickSmooth = onePole (0.02f, (float) controlFrames, rate);  // Emphasis
+        deriveLfoStep(), deriveDrive(), deriveOut(), deriveEnvGain(), deriveAttack(), deriveRelease();
     }
 
     void setClock (int c, int index)
@@ -810,6 +821,7 @@ private:
             c[b] = pairs[b], s[b] = state[b];
         const Pair wet = wetPair, dryGain = dryPair, dd = distDrive, dp = distPost, dOn = distOn;
         const float eg = envGainNow, attack = attackCoef, release = releaseCoef, smooth = smoothCoef;
+        const bool meter = bendOn;
         const float switchBy = (float) switchDir * switchStep;
         float sw = switchGain;
         const float mixTo = mixTarget, outTo = outTarget, driveTo = driveTarget, compTo = compTarget;
@@ -845,8 +857,11 @@ private:
                 y = c[b].m0 * y + c[b].m1 * v1 + c[b].m2 * v2;
                 if (dist)
                 {
-                    const Pair a = y < 0.0f ? -y : y, bentBy = a * dOn;
-                    bent = bentBy > bent ? bentBy : bent;
+                    if (meter)
+                    {
+                        const Pair a = y < 0.0f ? -y : y, bentBy = a * dOn;
+                        bent = bentBy > bent ? bentBy : bent;
+                    }
                     y = dOn > 0.5f ? saturatePair (y) : y;
                 }
             }

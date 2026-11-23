@@ -45,6 +45,7 @@ struct Feed
     std::atomic<float> control[3] {};
     std::atomic<float> meters[6] {}; // input L/R, distortion L/R, output L/R
     std::atomic<uint32_t> blocks { 0 };
+    std::atomic<uint64_t> frames { 0 }; // frames rendered, so a second is a second at any block size
 };
 
 // What the page asks of the sound: Inc, Dec and Reset pressed, and the wheel through a sequence's filters. Each is
@@ -213,10 +214,10 @@ public:
         if (fired != seenTriggers)
             seenTriggers = fired, flashUntilMs = nowMs + flashMs;
         // The meters: the loudest since the last paint, falling back 30 dB a second.
+        const float fall = std::pow (10.0f, -1.5f * (float) since / 1000.0f);
         for (int m = 0; m < 6; ++m)
         {
             const float peak = feed.meters[m].exchange (0.0f, std::memory_order_relaxed);
-            const float fall = std::pow (10.0f, -1.5f * (float) since / 1000.0f);
             meter[m] = live ? std::max (peak, meter[m] * fall) : 0.0f;
         }
 

@@ -50,7 +50,7 @@ struct Plugin
     Screen screen { values, feed, engine.bank(), commands };
     std::atomic<uint64_t> outgoing { 0 };
     std::atomic<bool> paintAsked { false };
-    std::atomic<uint32_t> meterUntil { 0 }; // the page's meters are kept up until this block (about a second after a paint)
+    std::atomic<uint64_t> meterUntilFrame { 0 }; // the page's meters are kept up until this frame (a second after a paint)
     uint32_t sincePaint = 0; // frames since the audio thread last asked for a paint
     std::atomic<bool> inputSeen { false }; // an input on the page since its last paint (used or not)
     // A state's bank and sequences as loadBank() reads them, whole before any of it is used (main thread; each
@@ -599,7 +599,8 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         p.engine.transport (false, false, 0.0, 120.0);
 
     // The page's input and output meters, only while it is being painted: the loudest sample of each side.
-    const bool metering = p.feed.blocks.load (std::memory_order_relaxed) < p.meterUntil.load (std::memory_order_relaxed);
+    const bool metering = p.feed.frames.load (std::memory_order_relaxed) < p.meterUntilFrame.load (std::memory_order_relaxed);
+    p.engine.bendMetering (metering);
     auto peak = [frames] (const float* x) {
         float m = 0.0f;
         for (uint32_t i = 0; x != nullptr && i < frames; ++i)
@@ -659,6 +660,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
                 p.feed.meters[m].store (meters[m], std::memory_order_relaxed);
     }
     p.feed.blocks.fetch_add (1, std::memory_order_release);
+    p.feed.frames.fetch_add (frames, std::memory_order_release);
     if (p.hostScreen != nullptr)
     {
         p.sincePaint += frames;
@@ -703,7 +705,7 @@ bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
         drew = p.screen.paintTitleOnly (h, c->pixels, (int) c->stride);
     else if (c->whole || asked || changed || p.screen.due (h.nowMs))
     {
-        p.meterUntil.store (p.feed.blocks.load (std::memory_order_relaxed) + 400, std::memory_order_relaxed);
+        p.meterUntilFrame.store (p.feed.frames.load (std::memory_order_relaxed) + (uint64_t) p.engine.sampleRate(), std::memory_order_relaxed); // a second of frames, at any block size
         p.screen.update (h.nowMs);
         drew = p.screen.paint (h, c->pixels, (int) c->stride, c->whole);
         p.screen.drew (h);
