@@ -22,6 +22,10 @@ envelope follower curve, high-Emphasis peak compensation on resonant LP/HP cubes
 tenors in Vowels, low-passed modal Resonators with musical Qs, non-crossing Shepard Swirl, active mid-cube Harmonic
 Comb, non-colliding Acid Twins, and stronger baseline levels).
 
+**Version 0.3.1** completes the envelope-trigger fix at the top of Trig Level: at 96 kHz and over with slow
+Env Attacks, 0 dB could still never fire, and it fires there now. It also refuses absurd song positions from a
+host and keeps the filter design's rate constants per thread. The sound is otherwise 0.3.0's to the bit.
+
 ## Signal flow
 
 ```

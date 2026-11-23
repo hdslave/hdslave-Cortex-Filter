@@ -1117,12 +1117,12 @@ void testLatencyTailAndSleep()
         const auto* latency = static_cast<const clap_plugin_latency*> (a.plugin->get_extension (a.plugin, CLAP_EXT_LATENCY));
         const auto* tail = static_cast<const clap_plugin_tail*> (a.plugin->get_extension (a.plugin, CLAP_EXT_TAIL));
         CHECK (latency != nullptr && latency->get (a.plugin) == 0);
-        CHECK (tail != nullptr && tail->get (a.plugin) == (uint32_t) (cortex::tailSeconds * 48000.0f + 0.5f));
+        CHECK (tail != nullptr && tail->get (a.plugin) == 528000u); // the measured 11 s at 48 kHz, in frames
     }
     {
         Instance a (44100.0);
         const auto* tail = static_cast<const clap_plugin_tail*> (a.plugin->get_extension (a.plugin, CLAP_EXT_TAIL));
-        CHECK (tail != nullptr && tail->get (a.plugin) == (uint32_t) (cortex::tailSeconds * 44100.0f + 0.5f));
+        CHECK (tail != nullptr && tail->get (a.plugin) == 485100u); // the same 11 s at 44.1 kHz
     }
     {
         const auto* d = factory->get_plugin_descriptor (factory, 0);

@@ -19,7 +19,7 @@
 #include <strings.h>
 
 #ifndef CORTEX_VERSION
-#define CORTEX_VERSION "0.3.0"
+#define CORTEX_VERSION "0.3.1"
 #endif
 
 namespace cortex

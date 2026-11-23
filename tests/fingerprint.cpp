@@ -6,7 +6,8 @@
 // The scenarios: each factory preset, each cube at three points, random settings changed as it plays, other rates,
 // other block sizes (which must hash the same as 128), the song stopped and jumping under a synced LFO; from 0.2.0 the
 // factory's other filters, the sequencer (its clocks, gates and envelope, under a stopping and jumping song) and the
-// edit filter's settings changed as it plays. Hashes hold
+// edit filter's settings changed as it plays; from 0.3.1, blocks flooded with more events than there are
+// parameters. Hashes hold
 // for this toolchain and these flags (Melodee's build image, -O3 -mcpu=cortex-a55 -ffp-contract=fast).
 #include "signal.h"
 
@@ -280,6 +281,29 @@ std::vector<Scenario> scenarios()
         s.changes = { { 20000, "Freq Offset", 35 }, { 40000, "Left Dist", 20 }, { 60000, "Freq Gain", -15 }, { 80000, "Xform > Dist", 1 },
                       { 90000, "Transform", 0.9 }, { 100000, "Right Gain", -8 }, { 110000, "Exit Fade", 0.4 }, { 110000, "Enter Fade", 0.5 },
                       { 120000, "Filter", 13 }, { 150000, "Cube", 0 }, { 170000, "Filter", 10 } };
+        list.push_back (s);
+    }
+    {
+        // More events in one 128-frame block than there are parameters, twice (67 in the first block, its three
+        // settings at frame 0 among them): every knob's working-out in set(), between a block's events, holds
+        // to the bit under a flood.
+        Scenario s;
+        s.name = "event-flood";
+        s.seconds = 3.0;
+        s.values = { { "Filter", 10 }, { "LFO > Freq", 0.5 }, { "Env > Morph", 0.4 } };
+        const std::vector<std::pair<std::string, std::pair<double, double>>> knobs = {
+            { "Glide", { 0, 1 } }, { "Drive", { 0, 24 } }, { "Output", { -24, 12 } }, { "LFO Rate", { 0, 1 } },
+            { "Env Gain", { 0, 24 } }, { "Env Attack", { 0, 1 } }, { "Env Release", { 0, 1 } }, { "Morph", { 0, 1 } },
+            { "Freq", { 0, 1 } }, { "Transform", { 0, 1 } }, { "Emphasis", { -1, 1 } }, { "Mix", { 0, 1 } },
+            { "Spread", { 0, 1 } }, { "LFO > Morph", { -1, 1 } }, { "Env > Freq", { -1, 1 } },
+        };
+        for (uint64_t base : { 0ull, 96000ull })
+            for (int k = 0; k < 64; ++k)
+            {
+                const auto& [name, range] = knobs[(size_t) k % knobs.size()];
+                const double v = range.first + (range.second - range.first) * ((k * 37 + 11) % 100) / 100.0;
+                s.changes.push_back ({ base + (uint64_t) (k * 2), name, v });
+            }
         list.push_back (s);
     }
     return list;

@@ -1088,6 +1088,34 @@ void testVerifiedFixes()
         }
         CHECK (s.e.sequencer().pos == 2);
     }
+    // The same at high rates with the slowest attack, where the follower stalls furthest under full scale (its
+    // steps shrink with the attack coefficient, which shrinks as the rate rises): a full-scale burst still fires
+    // once a burst, and a burst 1 dB under Trig Level never does.
+    for (double rate : { 96000.0, 192000.0, 384000.0 })
+    {
+        Song s (rate);
+        s.playing = false;
+        program (s.e.bank(), 9, { 1, 2, 3, 4, 5 });
+        s.e.set (ParamId::sequence, 9), s.e.set (ParamId::envTrigger, 1), s.e.set (ParamId::trigLevel, 0.0f);
+        s.e.set (ParamId::envAttack, attackKnob (0.2f)), s.e.set (ParamId::envRelease, releaseKnob (0.02f));
+        s.e.reset();
+        const uint64_t second = (uint64_t) rate;
+        s.level (0.891f); // -1 dB: under Trig Level, however long it sits there
+        s.run (second * 4);
+        CHECK (s.e.sequencer().pos == 0);
+        s.level (0.0f);
+        s.run (second);
+        for (int burst = 0; burst < 2; ++burst)
+        {
+            s.level (1.0f);
+            s.run (second * 4); // long enough for a 200 ms attack to settle where it stalls
+            s.level (0.0f);
+            s.run (second);
+        }
+        if (s.e.sequencer().pos != 2)
+            std::printf ("  Trig Level 0 dB at %.0f Hz, 200 ms attack: pos %d, not 2\n", rate, s.e.sequencer().pos);
+        CHECK (s.e.sequencer().pos == 2);
+    }
     // Text that is not a finite number is refused, not clamped to the knob's end.
     {
         float v = 0.0f;
@@ -1109,6 +1137,23 @@ void testVerifiedFixes()
                 e.render (in, in, outL, outR, 128);
             }
             CHECK (std::isfinite (e.lfoPlace()) && std::isfinite (outL[0] + outR[127]));
+        }
+    }
+    // A song place no real song reaches is no place at all: never fed to the clocks' cell arithmetic (a place
+    // near 1e300 beats would overflow its cast to whole cells), the sound stays finite and the sequence still.
+    {
+        Engine e;
+        e.prepare (48000.0, 128);
+        e.set (ParamId::sequence, 1), e.set (ParamId::lfoSync, 4);
+        float in[128] = {}, outL[128], outR[128];
+        for (double beats : { 1e300, -1e300, 1e30 })
+        {
+            for (int b = 0; b < 8; ++b)
+            {
+                e.transport (true, true, beats, 120.0);
+                e.render (in, in, outL, outR, 128);
+            }
+            CHECK (std::isfinite (e.lfoPlace()) && std::isfinite (outL[0] + outR[127]) && e.triggerCount() == 0);
         }
     }
     // An absurd sample rate is not taken: the engine keeps a sane rate and renders finite sound.

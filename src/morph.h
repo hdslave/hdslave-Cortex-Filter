@@ -161,9 +161,10 @@ inline float blend (const float* v, const Weights& w)
 inline void design (const CubeTable& c, const Position& p, float emphasis, float rate, Design& d)
 {
     const Weights w = weightsOf (p);
-    // The rate's two constants, kept from the last design at this rate (worked out again only when it changes;
+    // The rate's two constants, kept from the last design at this rate on this thread (the sound designs on the
+    // audio thread, the screen on its own, and instances share neither; worked out again only when it changes;
     // the same values either way, so the design is to the bit as it was).
-    static float rateSeen = 0.0f, piOverRateSeen = 0.0f, highestSeen = 0.0f;
+    thread_local float rateSeen = 0.0f, piOverRateSeen = 0.0f, highestSeen = 0.0f;
     if (rate != rateSeen)
         piOverRateSeen = pi / rate, highestSeen = std::log2 (0.45f * rate), rateSeen = rate;
     const float qShift = emphasis * (emphasis < 0.0f ? emphasisWideOctaves : emphasisOctaves), piOverRate = piOverRateSeen;

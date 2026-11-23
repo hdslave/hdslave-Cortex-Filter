@@ -246,10 +246,11 @@ public:
     // last bits depend on where the blocks fall. The song starting starts the sequence again.
     void transport (bool playing, bool placed, double beats, double bpm)
     {
-        // A hostile host's tempo or place never reaches the clocks (an infinite one would make their cell
-        // arithmetic undefined): anything real lies well inside these.
+        // A hostile host's tempo or place never reaches the clocks (an infinite or absurdly large one would
+        // overflow their cell arithmetic): anything real lies well inside these (a CLAP place is at most
+        // about 4e9 beats).
         bpm = std::isfinite (bpm) ? std::clamp (bpm, 1.0, 1000.0) : 120.0;
-        placed = placed && std::isfinite (beats);
+        placed = placed && std::isfinite (beats) && std::fabs (beats) <= 1e12;
         const double perFrame = bpm / 60.0 / (double) rate;
         const bool now = playing && placed;
         if (now && (! songPlaying || perFrame != beatsPerFrame || std::fabs (beats - songBeatsAt (frame)) > 1e-6))
@@ -506,8 +507,12 @@ private:
         if (envTrigMode != 0 && on)
         {
             // The follower stalls a float's breadth under a full-scale input, so the dB norm never quite reaches 1:
-            // Trig Level's top (0 dB) is held that much under it, or it could never fire there.
-            const float level = std::min ((trigLevelDb - envFloorDb) / -envFloorDb, 1.0f - 1e-4f),
+            // Trig Level's top (0 dB) is held under that stall, or it could never fire there. The stall widens as
+            // the attack coefficient shrinks (a step stops moving the float once it is under half its last bit:
+            // in the norm, about 5.4e-9 / attackCoef under full scale), so the hold-off grows with it; where the
+            // fixed 1e-4 already cleared the stall, the level is as it was.
+            const float stall = attackCoef > 0.0f ? 5.4e-9f / attackCoef : 0.0f;
+            const float level = std::min ((trigLevelDb - envFloorDb) / -envFloorDb, 1.0f - std::max (1e-4f, 2.0f * stall)),
                         again = std::max (0.0f, level - trigHysteresisDb / -envFloorDb);
             if (envArmed && envTrigNorm >= level)
                 ++fire[envTrigMode - 1], envArmed = false;
