@@ -1152,6 +1152,29 @@ void testVerifiedFixes()
             ok &= std::isfinite (outL[i]) && std::fabs (outL[i]) <= 2.0f && std::isfinite (outR[i]);
         CHECK (ok);
     }
+    // The page's commands: fresh for half a second of sound, however long the sound slept in wall time; stale
+    // once half a second of sound has passed them; a full ring drops what it cannot hold.
+    {
+        Commands c;
+        c.keepFor (48000.0f);
+        int fired = 0, lastKind = -1;
+        auto take = [&] { c.take ([&] (int kind, int) { ++fired, lastKind = kind; }); };
+        c.press (0);
+        take();
+        CHECK (fired == 1 && lastKind == 0);
+        c.press (1); // asleep: no frames pass, so the press is still fresh whenever the sound wakes
+        take();
+        CHECK (fired == 2 && lastKind == 1);
+        c.press (2);
+        c.tick (24001); // half a second of sound since the press: stale
+        take();
+        CHECK (fired == 2);
+        for (int i = 0; i < 70; ++i)
+            c.press (0);
+        take();
+        CHECK (fired == 2 + 64);
+        CHECK (! c.waiting());
+    }
     // Latency is truly none: an impulse's answer starts on its own sample.
     {
         Engine e;

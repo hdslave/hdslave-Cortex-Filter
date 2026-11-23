@@ -795,7 +795,10 @@ void testPagePresses()
     };
     const Stereo quiet = render (false, nullptr);
     CHECK (maxDifference (render (true, nullptr), quiet) > 0.01f); // fresh: the sequence steps on
-    CHECK (maxDifference (render (true, [] (Instance&) { std::this_thread::sleep_for (std::chrono::milliseconds (600)); }), quiet) == 0.0f);
+    // Freshness is counted in frames rendered, not wall time: a press made while no block ran for 600 ms (the host
+    // had let the sound sleep; the press itself asks for a block) still fires, once. Stopped, reset or reactivated
+    // in between, it does not (below): those clear what waits.
+    CHECK (maxDifference (render (true, [] (Instance&) { std::this_thread::sleep_for (std::chrono::milliseconds (600)); }), quiet) > 0.01f);
     CHECK (maxDifference (render (true, restart), render (false, restart)) == 0.0f);
     CHECK (maxDifference (render (true, reset), render (false, reset)) == 0.0f);
     CHECK (maxDifference (render (true, reactivate), render (false, reactivate)) == 0.0f);

@@ -513,6 +513,7 @@ bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t 
     for (uint32_t i = 0; i < paramCount; ++i) // values the host set while inactive: in place before the glides settle
         p.applied[i] = p.values[i].load (std::memory_order_relaxed), p.engine.set (paramTable[i].id, p.applied[i]);
     p.engine.prepare (rate, maxFrames);
+    p.commands.keepFor ((float) rate);
     p.feed.rate.store ((float) rate, std::memory_order_relaxed);
     p.active = true;
     invalidatePage (p);
@@ -581,14 +582,15 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         p.engine.settle();
 
     // Events at the block's first frame come first, with the page's triggers and wheel (the sequencer's Inc, Dec,
-    // Reset; stepping through a sequence's filters: those given in the last half second), the transport after them.
+    // Reset; stepping through a sequence's filters: those given in the last half second of sound), the transport
+    // after them. No wall clock is read here: their freshness is counted in frames (screen.h).
     const auto* in = process->in_events;
     const uint32_t count = in != nullptr ? in->size (in) : 0;
     uint32_t next = 0;
     for (; next < count && in->get (in, next)->time == 0; ++next)
         handle (p, in->get (in, next));
     if (p.commands.waiting())
-        p.commands.take (Commands::nowMs(), [&p] (int kind, int amount) {
+        p.commands.take ([&p] (int kind, int amount) {
             if (kind == Commands::wheelKind)
                 p.engine.browse (amount);
             else
@@ -669,6 +671,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     }
     p.feed.blocks.fetch_add (1, std::memory_order_release);
     p.feed.frames.fetch_add (frames, std::memory_order_release);
+    p.commands.tick (frames);
     if (p.hostScreen != nullptr)
     {
         p.sincePaint += frames;
