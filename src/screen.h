@@ -159,9 +159,11 @@ public:
         groupList[6] = { "ENV", envelope, 6 }, groupList[7] = { "OUT", out, 4 };
     }
 
+    bool inFxChain = false; // the chain strip shows a single response, independent of the full page’s TIME/MORPH setting
+
     // The graphs move by themselves: sound ran through the filter lately, or MORPH view's landscape is still catching
     // up with a change (it follows a few slices a frame, even while the sound sleeps).
-    bool animating (const hdui::Host&) const override { return live || (groupIndex() == cubeGroup && viewMorph && morphStale() > 0); }
+    bool animating (const hdui::Host&) const override { return live || (! inFxChain && groupIndex() == cubeGroup && viewMorph && morphStale() > 0); }
     // A moving picture's next frame is due (about 30 a second).
     bool due (uint64_t nowMs) const { return nowMs - lastHost.nowMs >= frameMs; }
 
@@ -292,6 +294,28 @@ protected:
             std::copy_n (wordmark::fixed.data() + y * wordmark::width, wordmark::width, r.px + y * r.stride);
         wordmark::drawMotion (r.px, r.stride, titleFrame (h));
     }
+    void drawFxStrip (hdui::Raster& r, const hdui::Host& h, int height) override
+    {
+        r.box (0, 0, hdui::width, height, colours.bg);
+        drawTitle (r, h);
+        drawStatus (r, h, hdui::width - 6);
+        r.box (0, 29, hdui::width, 1, colours.rule);
+        drawCube (r, h, Camera (yaw(), pitch(), 4.6f, 120.0f, 62.0f, 72.0f), false);
+
+        constexpr int x = 125, y = 40, w = 189, rows = 65;
+        r.box (x, y, w, rows, colours.panel);
+        for (int decade = 1; decade <= 2; ++decade)
+            r.box (x + decade * (w - 1) / 3, y, 1, rows, colours.rule);
+        const int zero = y + (int) std::lround (dbHigh * (rows - 1) / (dbHigh - dbLow));
+        r.line (x, zero, x + w - 1, zero, colours.dim, 1);
+        if (splitNow)
+            drawCurve (r, rightDb, x, y, w, rows, magenta);
+        drawCurve (r, sliceDb[sliceHead], x, y, w, rows, accent (h));
+        r.text (x, y + rows + 1, "20 Hz", colours.muted);
+        r.text (x + w - hdui::textWidth ("20 kHz"), y + rows + 1, "20 kHz", colours.muted);
+        drawStrip (r, h, height - stripH - 1);
+    }
+
     bool tallCustom() const override { return true; }
     bool customEditing() const override { return groupIndex() == seqGroup && editingStep; }
 

@@ -22,11 +22,13 @@ int main (int argc, char** argv)
                                   [] (const clap_host*) {}, [] (const clap_host*) {}, [] (const clap_host*) {} };
     clap_entry.init ("");
     const auto* factory = static_cast<const clap_plugin_factory*> (clap_entry.get_factory (CLAP_PLUGIN_FACTORY_ID));
-    std::vector<uint32_t> pixels (MELODEE_SCREEN_WIDTH * MELODEE_SCREEN_HEIGHT, 0);
-    melodee_screen_canvas_t canvas {};
+    std::vector<uint32_t> pixels (MELODEE_SCREEN_WIDTH * MELODEE_SCREEN_PAGE_HEIGHT, 0);
+    melodee_screen_frame_t canvas {};
     canvas.pixels = pixels.data();
-    canvas.width = MELODEE_SCREEN_WIDTH, canvas.height = MELODEE_SCREEN_HEIGHT, canvas.stride = MELODEE_SCREEN_WIDTH;
-    canvas.accent = 0xff3ee0ff;
+    canvas.width = MELODEE_SCREEN_WIDTH, canvas.height = MELODEE_SCREEN_PAGE_HEIGHT, canvas.stride = MELODEE_SCREEN_WIDTH;
+    if (mode == "strip")
+        canvas.height = MELODEE_SCREEN_STRIP_HEIGHT, canvas.area = MELODEE_SCREEN_STRIP;
+    canvas.colour = 0xff3ee0ff;
     uint64_t paintsDrawn = 0;
     const clap_plugin* plugin = factory->create_plugin (factory, &host, "com.hdslave.cortex-filter");
     plugin->init (plugin);
@@ -39,7 +41,7 @@ int main (int argc, char** argv)
     // moved slowly by the LFO. still: a cube standing still.
     std::vector<std::pair<uint32_t, double>> values;
     using namespace cortex::ParamId;
-    if (mode == "worst" || mode == "paint" || mode == "morph" || mode == "distort" || mode == "sequence")
+    if (mode == "worst" || mode == "paint" || mode == "morph" || mode == "strip" || mode == "distort" || mode == "sequence")
     {
         values = { { filter, 3 }, { spread, 0.6 }, { lfoRate, 0.9 }, { lfoMorph, 0.7 }, { lfoFreq, 0.5 }, { lfoTransform, 0.6 }, { envFreq, 0.4 },
                    { drive, 9 }, { mix, 0.8 } };
@@ -103,22 +105,22 @@ int main (int argc, char** argv)
         p.out_events = &out;
         plugin->process (plugin, &p);
         sum += left[0];
-        if ((mode == "paint" || mode == "morph") && b % 15 == 14) // every 40 ms of sound
+        if ((mode == "paint" || mode == "morph" || mode == "strip") && b % 15 == 14) // every 40 ms of sound
         {
-            static const auto* screen = static_cast<const clap_plugin_melodee_screen*> (plugin->get_extension (plugin, CLAP_EXT_MELODEE_SCREEN));
+            static const auto* screen = static_cast<const melodee_screen_t*> (plugin->get_extension (plugin, MELODEE_SCREEN_CLAP));
             if (mode == "morph" && b == 14)
             {
                 const melodee_screen_input_t push { MELODEE_SCREEN_PUSH, 0, false };
                 screen->input (plugin, &push);
             }
-            canvas.now_ms = 1000 + (b * block * 1000) / (uint64_t) rate;
-            canvas.whole = b == 14;
-            paintsDrawn += screen->paint (plugin, &canvas) ? 1 : 0;
+            canvas.time_ms = 1000 + (b * block * 1000) / (uint64_t) rate;
+            canvas.redraw_all = b == 14;
+            paintsDrawn += screen->draw (plugin, &canvas) ? 1 : 0;
         }
     }
     const double us = std::chrono::duration<double, std::micro> (std::chrono::steady_clock::now() - t0).count();
     std::printf ("%s: %llu blocks, %.2f us a block here (checksum %.6f)", mode.c_str(), (unsigned long long) blocks, us / (double) std::max<uint64_t> (blocks, 1), sum);
-    if (mode == "paint" || mode == "morph")
+    if (mode == "paint" || mode == "morph" || mode == "strip")
         std::printf (", %llu frames painted", (unsigned long long) paintsDrawn);
     std::printf ("\n");
     plugin->stop_processing (plugin);

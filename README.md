@@ -10,7 +10,7 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Since 0.2.0 it brings the full module workflow to the MPC: each **filter** in the 64-filter bank stores its own cube, axis offsets and ranges, fade-in/out times, per-side levels, and distortion (with Transform routable to distortion). A built-in **filter sequencer** steps through filter lists and commands (Pause, Halt, Bumper, Fade Time Scale) triggered by host clock divisions, the envelope follower, gate parameters, or the screen.
 
-Under **hdslaveOS**, Cortex Filter renders a live rotating 3D cube, a 3D frequency-response waterfall, axis/level meters, and dedicated filter-editing and sequence-programming pages (see [The screen](#the-screen)).
+In **Melodee 0.7 and hdslaveOS 0.7**, Cortex Filter renders a live rotating 3D cube, a 3D frequency-response waterfall, axis/level meters, and dedicated filter-editing and sequence-programming pages (see [The screen](#the-screen)).
 
 **Version 0.3.0** upgrades the audio DSP and cube voicing for smoother, fuller, more playable sound at under 3.5 % of one
 A55 core in the worst distorted case: per-sample linear interpolation of the SVF and mix coefficients across the 8-frame
@@ -220,8 +220,11 @@ it on a loudness meter's weighting, `tools/balance.sh`).
 
 ## The screen
 
-In hdslaveOS (hdslave's Melodee fork, its `hdslave` branch), Cortex Filter draws its own page in place of the
-parameter list. In stock Melodee or another host, the parameters are listed as usual.
+**Version 0.3.2** uses the official `melodee.screen/1` interface. In Melodee or hdslaveOS 0.7, focus Cortex Filter
+in a track, bus or master FX chain to see its compact view. The cube tracks the morph position, the graph shows
+the filter’s response, and K1–K3 show their assigned values and pickup marks. Push opens the full page with its
+eight groups. Shift + Push returns to the chain with the current group’s K1–K3 assignments.
+Hosts without this screen interface can use the CLAP parameter list.
 
 - **CUBE**, the main display. On the left, the cube in 3D, swaying slowly while sound runs through it: the filter's
   point glowing (the right channel's in magenta when Spread splits them), its trail, the path the LFO will take
@@ -283,7 +286,8 @@ within 0.3 dB of per-sample filter design (`-98.1 dB` on a 3 Hz vowel sweep and 
 
 A frame of the CUBE page takes about 576,000 instructions (about 0.32 ms) on Melodee's screen thread in TIME view,
 about 662,000 in MORPH view while the point moves (its landscape follows a few slices a frame), at most about 30
-frames a second while it moves. While nothing else moves, only the title is drawn again: a frame every 60 ms, about
+frames a second while it moves. The FX-chain strip costs about 333,000 instructions per moving frame in the same bench.
+While nothing else moves, only the title is drawn again: a frame every 60 ms, about
 18,300 instructions each (about 0.02 % of a core), for the 4 seconds it stays awake; then none, and none while the page
 is out of view.
 
@@ -360,6 +364,6 @@ add it to a track's effects. It needs only libc and libm, glibc 2.35 or newer (t
 
 - The screen's type: Departure Mono, copyright 2022–2024 Helena Zhang, SIL Open Font License 1.1
   (`licenses/OFL-departure-mono.txt`); its glyphs are rasterized into `src/ui/font.h`.
-- The screen extension's header, `src/melodee_screen.h`, is hdslaveOS's, MIT.
+- The screen extension's header, `src/melodee_screen.h`, is from Melodee by Kerem Kiliç (Ellic Studio), MIT.
 - CLAP headers: MIT license, `third_party/clap/LICENSE`.
 - The vowel formants are the standard published tenor values (five formants' frequency, level and bandwidth).

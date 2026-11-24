@@ -11,6 +11,7 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 
 cp "$ROOT"/../src/*.h "$ROOT"/../src/*.cpp "$ROOT"/../src/exports.map "$ROOT/src/"
 cp "$ROOT"/../src/ui/*.h "$ROOT/src/ui/"
+cp "$ROOT/../src/melodee_screen.h" "$ROOT/desktop/melodee_screen.h"
 
 echo "Applying this build's edits (desktop-fork.patch)..."
 patch -p1 -d "$ROOT" < "$ROOT/desktop-fork.patch"

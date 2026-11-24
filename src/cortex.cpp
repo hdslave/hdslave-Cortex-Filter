@@ -44,7 +44,7 @@ struct Plugin
     const clap_host_params* hostParams = nullptr;
     // Melodee's screen (melodee_screen.h): the page, what the audio thread tells it, the values it changed (told to
     // the host from the next process or flush, a bit a row) and whether an input asked for a paint now.
-    const clap_host_melodee_screen* hostScreen = nullptr;
+    const melodee_screen_host_t* hostScreen = nullptr;
     Feed feed;
     Commands commands;
     Screen screen { values, feed, engine.bank(), commands };
@@ -76,7 +76,7 @@ void invalidatePage (Plugin& p)
 {
     p.paintAsked.store (true, std::memory_order_release);
     if (p.hostScreen != nullptr)
-        p.hostScreen->request_paint (p.host);
+        p.hostScreen->redraw (p.host, 0);
 }
 
 // The values the screen's page set, told to the host (so its own copy, its automation and its knobs follow).
@@ -494,7 +494,7 @@ bool pluginInit (const clap_plugin* plugin)
     showFilter (p, editSlot (p), true); // not processing yet: this thread is the only one
     p.outgoing.store (0, std::memory_order_relaxed); // nothing to tell: the host reads the values as they are
     p.hostParams = static_cast<const clap_host_params*> (p.host->get_extension (p.host, CLAP_EXT_PARAMS));
-    p.hostScreen = static_cast<const clap_host_melodee_screen*> (p.host->get_extension (p.host, CLAP_EXT_MELODEE_SCREEN_HOST));
+    p.hostScreen = static_cast<const melodee_screen_host_t*> (p.host->get_extension (p.host, MELODEE_SCREEN_CLAP_HOST));
     return true;
 }
 
@@ -678,7 +678,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         if (p.sincePaint >= (uint32_t) (p.engine.sampleRate() * 0.025f))
         {
             p.sincePaint = 0;
-            p.hostScreen->request_paint (p.host);
+            p.hostScreen->redraw (p.host, 0);
         }
     }
     return CLAP_PROCESS_CONTINUE;
@@ -686,54 +686,59 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
 
 // Melodee's screen ---------------------------------------------------------------------------------------------
 
-hdui::Host hostOf (const melodee_screen_canvas_t* c)
+hdui::Host hostOf (const melodee_screen_frame_t* c)
 {
     hdui::Host h;
-    h.nowMs = c->now_ms;
-    h.accent = c->accent;
+    h.nowMs = c->time_ms;
+    h.accent = 0xff000000u | c->colour; // the page uses ARGB; black is a valid track colour
     h.shift = c->shift;
     h.playing = c->playing;
     for (int k = 0; k < 3; ++k)
-        h.pot[k] = c->knobs[k].position, h.engaged[k] = c->knobs[k].engaged;
+        h.pot[k] = c->pots[k], h.engaged[k] = c->pots_live[k];
     return h;
 }
 
-bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
+bool screenDraw (const void* plugin, const melodee_screen_frame_t* c)
 {
-    if (c == nullptr || c->pixels == nullptr || c->width != (uint32_t) hdui::width || c->height != (uint32_t) hdui::height
-        || c->stride < c->width)
+    if (plugin == nullptr || c == nullptr || c->pixels == nullptr || c->width != MELODEE_SCREEN_WIDTH
+        || c->stride < c->width || c->stride > INT32_MAX
+        || ! ((c->area == MELODEE_SCREEN_PAGE && c->height == MELODEE_SCREEN_PAGE_HEIGHT)
+              || (c->area == MELODEE_SCREEN_STRIP && c->height == MELODEE_SCREEN_STRIP_HEIGHT)))
         return false;
-    auto& p = of (plugin);
+    auto& p = of (static_cast<const clap_plugin*> (plugin));
     const hdui::Host h = hostOf (c);
+    const bool compact = c->area == MELODEE_SCREEN_STRIP;
+    const bool whole = c->redraw_all || compact != p.screen.inFxChain;
+    p.screen.inFxChain = compact;
     const bool asked = p.paintAsked.exchange (false, std::memory_order_acq_rel), changed = p.screen.hostChanged (h);
     const bool input = p.inputSeen.exchange (false, std::memory_order_acq_rel);
     // The page wakes for a few seconds when it opens, on an input, a value changed, the host's own (a knob turned,
     // Shift, the song starting or stopping) and while sound runs (Screen::wake).
-    if (c->whole || asked || changed || input || p.screen.newBlocks())
+    if (whole || asked || changed || input || p.screen.newBlocks())
         p.screen.wake (h.nowMs);
     bool drew = false;
-    if (! c->whole && ! asked && ! changed && p.screen.bodyAtRest (h))
+    if (! whole && ! asked && ! changed && p.screen.bodyAtRest (h))
         drew = p.screen.paintTitleOnly (h, c->pixels, (int) c->stride);
-    else if (c->whole || asked || changed || p.screen.due (h.nowMs))
+    else if (whole || asked || changed || p.screen.due (h.nowMs))
     {
         p.meterUntilFrame.store (p.feed.frames.load (std::memory_order_relaxed) + (uint64_t) p.engine.sampleRate(), std::memory_order_relaxed); // a second of frames, at any block size
         p.screen.update (h.nowMs);
-        drew = p.screen.paint (h, c->pixels, (int) c->stride, c->whole);
+        drew = p.screen.paint (h, c->pixels, (int) c->stride, whole, (int) c->height);
         p.screen.drew (h);
     }
     // The next frame only while something moves: otherwise the title rests and nothing is asked for until the sound,
     // a value or an input asks for a paint (each of them does), or the host paints on its own (the page in view
     // again, a knob, the transport).
     if (p.screen.moving (h) && p.hostScreen != nullptr)
-        p.hostScreen->request_paint (p.host);
+        p.hostScreen->redraw (p.host, 0);
     return drew;
 }
 
-bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* e)
+bool screenInput (const void* plugin, const melodee_screen_input_t* e)
 {
-    if (e == nullptr || e->kind > MELODEE_SCREEN_NUDGE)
+    if (plugin == nullptr || e == nullptr || e->kind > MELODEE_SCREEN_STEP)
         return false;
-    auto& p = of (plugin);
+    auto& p = of (static_cast<const clap_plugin*> (plugin));
     p.inputSeen.store (true, std::memory_order_release); // wakes the page, even an input it has no use for
     hdui::Edits edits;
     const uint32_t commandsBefore = p.commands.count();
@@ -762,28 +767,29 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* e)
     if (changed && p.hostParams != nullptr && p.hostParams->request_flush != nullptr)
         p.hostParams->request_flush (p.host);
     // A trigger or the wheel through a sequence: the sound must run a block to take it, even asleep.
-    if (p.commands.count() != commandsBefore && p.host->request_process != nullptr)
-        p.host->request_process (p.host);
+    const bool command = p.commands.count() != commandsBefore;
     if (used)
-        invalidatePage (p);
-    else if (p.hostScreen != nullptr) // nothing to draw, but the title wakes
-        p.hostScreen->request_paint (p.host);
+        p.paintAsked.store (true, std::memory_order_release);
+    if (p.hostScreen != nullptr)
+        p.hostScreen->redraw (p.host, (changed || command) ? MELODEE_SCREEN_RUN : 0);
+    else if (command && p.host->request_process != nullptr)
+        p.host->request_process (p.host);
     return used;
 }
 
-void screenKnobs (const clap_plugin* plugin, clap_id ids[3])
+void screenControls (const void* plugin, uint32_t ids[3])
 {
     uint32_t chosen[3];
-    of (plugin).screen.knobs (chosen);
+    of (static_cast<const clap_plugin*> (plugin)).screen.knobs (chosen);
     for (int k = 0; k < 3; ++k)
-        ids[k] = chosen[k] == hdui::noParam ? CLAP_INVALID_ID : chosen[k];
+        ids[k] = chosen[k] == hdui::noParam ? MELODEE_SCREEN_NO_CONTROL : chosen[k];
 }
 
-const clap_plugin_melodee_screen screenExtension { screenPaint, screenInput, screenKnobs };
+const melodee_screen_t screenExtension { screenDraw, screenInput, screenControls };
 
 const void* pluginExtension (const clap_plugin*, const char* id)
 {
-    if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN) == 0) return &screenExtension;
+    if (std::strcmp (id, MELODEE_SCREEN_CLAP) == 0) return &screenExtension;
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &paramsExtension;
     if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &stateExtension;
     if (std::strcmp (id, CLAP_EXT_AUDIO_PORTS) == 0) return &audioExtension;

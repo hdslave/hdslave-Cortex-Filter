@@ -37,18 +37,23 @@ int failures = 0, checks = 0;
 const clap_plugin_entry* entry = nullptr;
 const clap_plugin_factory* factory = nullptr;
 
+int screenRuns = 0;
 int rescans = 0, flushes = 0, paints = 0, presetsLoaded = 0, presetErrors = 0, processes = 0;
 const void* hostExtension (const clap_host*, const char* id)
 {
     static const clap_host_log log { [] (const clap_host*, clap_log_severity s, const char* m) { std::printf ("  [plug-in log %d] %s\n", (int) s, m); } };
     static const clap_host_params params { [] (const clap_host*, clap_param_rescan_flags f) { rescans += (f & CLAP_PARAM_RESCAN_VALUES) != 0; },
                                            [] (const clap_host*, clap_id, clap_param_clear_flags) {}, [] (const clap_host*) { ++flushes; } };
-    static const clap_host_melodee_screen screen { [] (const clap_host*) { ++paints; } };
+    static const melodee_screen_host_t screen { [] (const void*, uint32_t flags) {
+        ++paints;
+        if (flags & MELODEE_SCREEN_RUN)
+            ++processes, ++screenRuns;
+    } };
     static const clap_host_preset_load presetLoad {
         [] (const clap_host*, uint32_t, const char*, const char*, int32_t, const char*) { ++presetErrors; },
         [] (const clap_host*, uint32_t, const char*, const char*) { ++presetsLoaded; },
     };
-    if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN_HOST) == 0) return &screen;
+    if (std::strcmp (id, MELODEE_SCREEN_CLAP_HOST) == 0) return &screen;
     if (std::strcmp (id, CLAP_EXT_LOG) == 0) return &log;
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &params;
     if (std::strcmp (id, CLAP_EXT_PRESET_LOAD) == 0) return &presetLoad;
@@ -376,11 +381,11 @@ void testState()
         {
             Instance a;
             a.setup ({ { "Filter", 40 }, { "Cube", 13 }, { "Freq Offset", 25 }, { "Right Dist", 12 }, { "Filter", 9 }, { "Sequence", 12 } }, 0.01);
-            const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+            const auto* screen = static_cast<const melodee_screen_t*> (a.plugin->get_extension (a.plugin, MELODEE_SCREEN_CLAP));
             auto in = [&] (uint32_t kind, int value) { melodee_screen_input_t e { kind, value, false }; return screen->input (a.plugin, &e); };
             // SEQ (two groups on), Sequence 12 empty: Add Step twice (the filter Filter picks, F09), then the first
             // step made a Halt: its choices are the 33 filters in use (F01-F32, F40), then Pause, Halt.
-            CHECK (in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_NUDGE, 1));
+            CHECK (in (MELODEE_SCREEN_STEP, 1) && in (MELODEE_SCREEN_STEP, 1));
             CHECK (in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_PUSH, 0));
             CHECK (in (MELODEE_SCREEN_WHEEL, -5) && in (MELODEE_SCREEN_PUSH, 0)); // editing step 1, on F09 (choice 8)
             CHECK (in (MELODEE_SCREEN_WHEEL, 33 + 1 - 8) && in (MELODEE_SCREEN_PUSH, 0));
@@ -778,9 +783,9 @@ void testPagePresses()
     auto render = [&] (bool pressed, const std::function<void (Instance&)>& before) {
         Instance a;
         a.setup ({ { "Sequence", 1 }, { "Inc Clock", 0 } }, 0.3);
-        const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+        const auto* screen = static_cast<const melodee_screen_t*> (a.plugin->get_extension (a.plugin, MELODEE_SCREEN_CLAP));
         auto in = [&] (uint32_t kind, int value) { melodee_screen_input_t e { kind, value, false }; return screen->input (a.plugin, &e); };
-        CHECK (in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_WHEEL, 6)); // TRIG, INC
+        CHECK (in (MELODEE_SCREEN_STEP, 1) && in (MELODEE_SCREEN_STEP, 1) && in (MELODEE_SCREEN_STEP, 1) && in (MELODEE_SCREEN_WHEEL, 6)); // TRIG, INC
         if (pressed)
             CHECK (in (MELODEE_SCREEN_PUSH, 0));
         if (before)
@@ -846,19 +851,19 @@ void demos (const std::string& folder)
 void testScreen (const std::string& folder)
 {
     Instance a;
-    const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+    const auto* screen = static_cast<const melodee_screen_t*> (a.plugin->get_extension (a.plugin, MELODEE_SCREEN_CLAP));
     CHECK (screen != nullptr);
     if (screen == nullptr)
         return;
-    std::vector<uint32_t> pixels (MELODEE_SCREEN_WIDTH * MELODEE_SCREEN_HEIGHT, 0);
-    melodee_screen_canvas_t canvas {};
+    std::vector<uint32_t> pixels (MELODEE_SCREEN_WIDTH * MELODEE_SCREEN_PAGE_HEIGHT, 0);
+    melodee_screen_frame_t canvas {};
     canvas.pixels = pixels.data();
-    canvas.width = MELODEE_SCREEN_WIDTH, canvas.height = MELODEE_SCREEN_HEIGHT, canvas.stride = MELODEE_SCREEN_WIDTH;
-    canvas.accent = 0xff3ee0ff;
-    for (auto& k : canvas.knobs)
-        k = { -1, true };
+    canvas.width = MELODEE_SCREEN_WIDTH, canvas.height = MELODEE_SCREEN_PAGE_HEIGHT, canvas.stride = MELODEE_SCREEN_WIDTH;
+    canvas.colour = 0x003ee0ff;
+    for (int k = 0; k < 3; ++k)
+        canvas.pots[k] = -1, canvas.pots_live[k] = 1;
     uint64_t now = 960;
-    auto paint = [&] (bool whole = false) { canvas.whole = whole, canvas.now_ms = now; return screen->paint (a.plugin, &canvas); };
+    auto paint = [&] (bool whole = false) { canvas.redraw_all = whole, canvas.time_ms = now; return screen->draw (a.plugin, &canvas); };
     auto outsideTitleMotion = [&] {
         auto copy = pixels;
         for (int y = 1; y < 26; ++y)
@@ -874,7 +879,7 @@ void testScreen (const std::string& folder)
         CHECK (writePng ((folder + "/screen-" + name + ".png").c_str(), pixels.data(), 320, 218, 320, 2));
     };
     auto in = [&] (uint32_t kind, int value, bool shift = false) { melodee_screen_input_t e { kind, value, shift }; return screen->input (a.plugin, &e); };
-    auto knobs = [&] () { std::vector<clap_id> ids (3); screen->knobs (a.plugin, ids.data()); return ids; };
+    auto knobs = [&] () { std::vector<clap_id> ids (3); screen->controls (a.plugin, ids.data()); return ids; };
     // Sound for `ms`, a frame painted every 40 ms of it.
     const Stereo music = loop (48000.0, 8.0);
     size_t musicAt = 0;
@@ -924,7 +929,7 @@ void testScreen (const std::string& folder)
     const auto resting = pixels;
     now += 1000;
     CHECK (! paint() && paints == requests && pixels == resting);
-    CHECK (! in (MELODEE_SCREEN_NUDGE, -1) && paints > requests);
+    CHECK (! in (MELODEE_SCREEN_STEP, -1) && paints > requests);
     now += 60;
     CHECK (paint() && pixels != resting && outsideTitleMotion() == still);
     now += 4100;
@@ -1009,13 +1014,13 @@ void testScreen (const std::string& folder)
     CHECK (! paint() && paints == restingPaints && outsideTitleMotion() == quiet);
 
     // FILTER: Plus moves to the next group; K1-K3 follow the cursor; Push edits the filter Filter picks (F01 here).
-    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK (in (MELODEE_SCREEN_STEP, 1));
     CHECK ((knobs() == std::vector<clap_id> { a.id ("Filter"), a.id ("Cube"), a.id ("Morph Offset") }));
     CHECK (in (MELODEE_SCREEN_WHEEL, 3) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, 20) && in (MELODEE_SCREEN_PUSH, 0));
     CHECK (a.value ("Freq Offset") == 20);
-    canvas.knobs[1] = { 90, false }; // K2 has yet to meet its value: the card shows where to move it
+    canvas.pots[1] = 90, canvas.pots_live[1] = 0; // K2 has yet to meet its value: the card shows where to move it
     shot ("filter");
-    canvas.knobs[1] = { -1, true };
+    canvas.pots[1] = -1, canvas.pots_live[1] = 1;
     a.setup ({ { "Filter", 2 } }, 0.01);
     CHECK (a.value ("Freq Offset") == 0);
     a.setup ({ { "Filter", 1 } }, 0.01);
@@ -1030,7 +1035,7 @@ void testScreen (const std::string& folder)
 
     // SEQ: off, it says so; K1 picks the sequence. With one, its steps; Push edits a step; while editing, Minus and
     // Plus jump through the choices rather than leave; the step changes (the state saved shows it).
-    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK (in (MELODEE_SCREEN_STEP, 1));
     shot ("seq-off");
     CHECK ((knobs() == std::vector<clap_id> { a.id ("Sequence"), a.id ("Inc Clock"), a.id ("Reset Clock") }));
     CHECK (a.loadPreset ("acid-sequence"));
@@ -1038,34 +1043,35 @@ void testScreen (const std::string& folder)
     shot ("seq");
     Memory beforeEdit, afterEdit;
     CHECK (a.state->save (a.plugin, &beforeEdit.out));
-    CHECK (in (MELODEE_SCREEN_WHEEL, 2) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_NUDGE, 1) && in (MELODEE_SCREEN_WHEEL, 1));
+    CHECK (in (MELODEE_SCREEN_WHEEL, 2) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_STEP, 1) && in (MELODEE_SCREEN_WHEEL, 1));
     shot ("seq-edit");
     CHECK (in (MELODEE_SCREEN_PUSH, 0));
     CHECK (a.state->save (a.plugin, &afterEdit.out) && afterEdit.bytes != beforeEdit.bytes);
     // TRIG: Inc pressed asks the sound to run (even asleep) and steps the sequence.
-    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK (in (MELODEE_SCREEN_STEP, 1));
     CHECK ((knobs() == std::vector<clap_id> { a.id ("Sequence"), a.id ("Inc Clock"), a.id ("Dec Clock") }));
-    const int processesBefore = processes;
+    const int processesBefore = processes, runsBefore = screenRuns;
     CHECK (in (MELODEE_SCREEN_WHEEL, 6) && in (MELODEE_SCREEN_PUSH, 0) && processes == processesBefore + 1);
+    CHECK (screenRuns == runsBefore + 1);
     play (200);
     shot ("trig");
     // KNOBS: the wheel changes Morph.
-    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK (in (MELODEE_SCREEN_STEP, 1));
     a.setup ({ { "Sequence", 0 }, { "Morph", 0.5 } }, 0.01);
     CHECK ((knobs() == std::vector<clap_id> { a.id ("Morph"), a.id ("Freq"), a.id ("Transform") }));
     CHECK (in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, 16));
     CHECK (std::fabs (a.value ("Morph") - (0.5 + 16.0 / 128.0)) < 1e-6);
     CHECK (in (MELODEE_SCREEN_PUSH, 0));
     shot ("knobs");
-    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK (in (MELODEE_SCREEN_STEP, 1));
     shot ("lfo");
-    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK (in (MELODEE_SCREEN_STEP, 1));
     shot ("env");
-    CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+    CHECK (in (MELODEE_SCREEN_STEP, 1));
     shot ("out");
-    CHECK (! in (MELODEE_SCREEN_NUDGE, 1)); // the last group
+    CHECK (! in (MELODEE_SCREEN_STEP, 1)); // the last group
     for (int i = 0; i < 7; ++i)
-        in (MELODEE_SCREEN_NUDGE, -1);
+        in (MELODEE_SCREEN_STEP, -1);
     canvas.shift = true;
     shot ("cube-shift");
     canvas.shift = false;
@@ -1074,11 +1080,11 @@ void testScreen (const std::string& folder)
     now += 2000;
     paint();
     for (int i = 0; i < 4; ++i)
-        CHECK (in (MELODEE_SCREEN_NUDGE, 1));
+        CHECK (in (MELODEE_SCREEN_STEP, 1));
     CHECK (in (MELODEE_SCREEN_WHEEL, 1) && in (MELODEE_SCREEN_PUSH, 0) && in (MELODEE_SCREEN_WHEEL, -40) && in (MELODEE_SCREEN_PUSH, 0)
            && in (MELODEE_SCREEN_WHEEL, -1));
     for (int i = 0; i < 4; ++i)
-        CHECK (in (MELODEE_SCREEN_NUDGE, -1));
+        CHECK (in (MELODEE_SCREEN_STEP, -1));
     now += 40;
     paint();
     const auto catchingUp = outsideTitleMotion();
@@ -1103,6 +1109,76 @@ void testScreen (const std::string& folder)
     OutEvents notified;
     a.params->flush (a.plugin, &move.in, &notified.out);
     CHECK (paint() && outsideTitleMotion() != presetBody);
+}
+
+void testFxStrip (const std::string& folder)
+{
+    Instance a;
+    const auto* screen = static_cast<const melodee_screen_t*> (a.plugin->get_extension (a.plugin, MELODEE_SCREEN_CLAP));
+    CHECK (screen != nullptr);
+    if (! screen)
+        return;
+
+    constexpr uint32_t width = MELODEE_SCREEN_WIDTH, height = MELODEE_SCREEN_STRIP_HEIGHT, stride = width + 7;
+    constexpr uint32_t sentinel = 0xab123456;
+    std::vector<uint32_t> padded ((height + 1) * stride, sentinel);
+    melodee_screen_frame_t frame {};
+    frame.pixels = padded.data();
+    frame.width = width, frame.height = height, frame.stride = stride;
+    frame.area = MELODEE_SCREEN_STRIP, frame.time_ms = 1440, frame.redraw_all = 1;
+    frame.colour = 0x003ee0ff;
+    for (int k = 0; k < 3; ++k)
+        frame.pots[k] = -1, frame.pots_live[k] = 1;
+    CHECK (screen->draw (a.plugin, &frame));
+    for (uint32_t y = 0; y < height; ++y)
+    {
+        auto row = padded.begin() + y * stride;
+        CHECK (std::none_of (row, row + width, [=] (auto p) { return p == sentinel; }));
+        CHECK (std::all_of (row + width, row + stride, [=] (auto p) { return p == sentinel; }));
+    }
+    CHECK (std::all_of (padded.end() - stride, padded.end(), [=] (auto p) { return p == sentinel; }));
+    const auto still = padded;
+    CHECK (writePng ((folder + "/screen-fx-strip.png").c_str(), padded.data(), width, height, stride, 2));
+    frame.redraw_all = 0;
+    CHECK (! screen->draw (a.plugin, &frame) && padded == still);
+    frame.colour = 0;
+    CHECK (screen->draw (a.plugin, &frame) && padded[(height - 20) * stride + 4] == 0xff000000u);
+    frame.colour = 0x003ee0ff;
+    CHECK (screen->draw (a.plugin, &frame) && padded == still);
+    frame.pots[1] = 90, frame.pots_live[1] = 0;
+    CHECK (screen->draw (a.plugin, &frame));
+    CHECK (std::equal (padded.begin(), padded.begin() + (height - 20) * stride, still.begin()));
+    CHECK (! std::equal (padded.begin() + (height - 20) * stride, padded.end(), still.begin() + (height - 20) * stride));
+
+    const auto beforeFilter = padded;
+    a.setup ({ { "Filter", 5 }, { "Spread", 0.7 } }, 0.1);
+    frame.time_ms += 100;
+    CHECK (screen->draw (a.plugin, &frame));
+    CHECK (! std::equal (padded.begin() + 40 * stride, padded.begin() + 105 * stride, beforeFilter.begin() + 40 * stride));
+    const auto incremental = padded;
+    frame.redraw_all = 1;
+    CHECK (screen->draw (a.plugin, &frame) && padded == incremental);
+
+    // Both area/height mismatches must be rejected before writing a pixel.
+    frame.area = MELODEE_SCREEN_PAGE;
+    CHECK (! screen->draw (a.plugin, &frame));
+    frame.area = MELODEE_SCREEN_STRIP, frame.height = MELODEE_SCREEN_PAGE_HEIGHT;
+    CHECK (! screen->draw (a.plugin, &frame) && padded == incremental);
+
+    // Returning to the full page redraws it and preserves its group and current controls.
+    std::vector<uint32_t> full (width * MELODEE_SCREEN_PAGE_HEIGHT, sentinel);
+    frame.area = MELODEE_SCREEN_PAGE, frame.stride = width, frame.redraw_all = 0, frame.pixels = full.data();
+    CHECK (screen->draw (a.plugin, &frame));
+    CHECK (std::find (full.begin(), full.end(), sentinel) == full.end());
+    const melodee_screen_input_t next { MELODEE_SCREEN_STEP, 1, 0 };
+    CHECK (screen->input (a.plugin, &next));
+    uint32_t ids[3] {};
+    screen->controls (a.plugin, ids);
+    CHECK (ids[0] == a.id ("Filter") && ids[1] == a.id ("Cube"));
+    frame.area = MELODEE_SCREEN_STRIP, frame.height = height, frame.stride = stride, frame.pixels = padded.data();
+    CHECK (screen->draw (a.plugin, &frame));
+    screen->controls (a.plugin, ids);
+    CHECK (ids[0] == a.id ("Filter") && ids[1] == a.id ("Cube"));
 }
 } // namespace
 
@@ -1197,6 +1273,7 @@ int main (int argc, char** argv)
     testLatencyTailAndSleep();
     demos (folder);
     testScreen (folder);
+    testFxStrip (folder);
     entry->deinit();
     std::printf ("host: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

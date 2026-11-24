@@ -11,7 +11,7 @@
  public:
      // The page's own buttons on FILTER (not parameters).
      static constexpr uint32_t copyButton = 1000, restoreButton = 1001;
-@@ -196,6 +197,11 @@
+@@ -198,6 +199,11 @@
      // The audio thread's news and the animation's step, before each paint.
      void update (uint64_t nowMs)
      {
@@ -23,7 +23,7 @@
          const uint32_t blocks = feed.blocks.load (std::memory_order_acquire);
          if (blocks != seenBlocks)
              seenBlocks = blocks, lastBlockMs = nowMs, heard = true;
-@@ -1021,7 +1027,7 @@
+@@ -1045,7 +1051,7 @@
          if (q == 0)
          {
              const char* a = "SEQUENCER OFF";
@@ -34,9 +34,9 @@
              return;
 --- a/src/cortex.cpp
 +++ b/src/cortex.cpp
-@@ -781,9 +781,20 @@
+@@ -787,9 +787,20 @@
  
- const clap_plugin_melodee_screen screenExtension { screenPaint, screenInput, screenKnobs };
+ const melodee_screen_t screenExtension { screenDraw, screenInput, screenControls };
  
 +} // namespace
 +} // namespace cortex
@@ -50,7 +50,7 @@
 +
  const void* pluginExtension (const clap_plugin*, const char* id)
  {
-     if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN) == 0) return &screenExtension;
+     if (std::strcmp (id, MELODEE_SCREEN_CLAP) == 0) return &screenExtension;
 +    if (std::strcmp (id, CLAP_EXT_HDSLAVE_TILES) == 0) return &tilesExtension;
      if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &paramsExtension;
      if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &stateExtension;
@@ -65,7 +65,7 @@
  public:
      Page() = default;
      Page (const Page&) = delete; // the picture below is the page's own
-@@ -313,6 +314,7 @@
+@@ -317,6 +318,7 @@
      Palette colours {};
      int current = 0;
      int cursor[12] {};
@@ -73,7 +73,7 @@
      bool editing = false;
  
      // Layout.
-@@ -378,13 +380,6 @@
+@@ -382,13 +384,6 @@
              drawCustom (r, host, 0, bodyY, width, tall ? tallH : bodyH);
          else
              drawList (r, host, g);
@@ -87,7 +87,7 @@
      }
  
      void drawList (Raster& r, const Host& host, const Group& g)
-@@ -392,39 +387,44 @@
+@@ -396,39 +391,44 @@
          const Palette& c = colours;
          const Ink hi = accent (host);
          const int row = cursor[current];
@@ -132,12 +132,14 @@
 +                drawBar (r, 157, y + rh / 2, 26, v, at ? hi : c.muted, c.rule);
              else
 -                r.frame (158, y + 2, 24, 9, at ? hi : c.rule);
-+                r.frame (158, y + 1, 24, rh - 2, at ? hi : c.rule);
-         }
+-        }
 -        if (g.count > rows) // where the list is
-+        if (g.count > visRows) // where the list is
-         {
+-        {
 -            const int h = bodyH * rows / g.count, y = bodyY + (bodyH - h) * top / std::max (1, g.count - rows);
++                r.frame (158, y + 1, 24, rh - 2, at ? hi : c.rule);
++        }
++        if (g.count > visRows) // where the list is
++        {
 +            const int h = pH * visRows / g.count, y = bodyY + (pH - h) * top / std::max (1, g.count - visRows);
              r.box (listW + 1, y, 1, h, c.rule);
          }

@@ -173,7 +173,7 @@ struct Host
     bool shift = false, playing = false;
 };
 
-enum class Key : uint8_t { wheel = 0, push = 1, nudge = 2 }; // as MELODEE_SCREEN_WHEEL, _PUSH, _NUDGE
+enum class Key : uint8_t { wheel = 0, push = 1, nudge = 2 }; // as MELODEE_SCREEN_WHEEL, _PUSH, _STEP
 
 // What an input did: parameters set (plain values) and buttons pressed.
 struct Edits
@@ -262,21 +262,24 @@ public:
 
     // Draws the page into `pixels`; false (and nothing touched) when it would look as it did. `whole`: the canvas
     // holds someone else's picture, so it is all drawn.
-    bool paint (const Host& host, uint32_t* pixels, int stride, bool whole)
+    bool paint (const Host& host, uint32_t* pixels, int stride, bool whole, int canvasHeight = height)
     {
         if (frame == nullptr) // taken at the first paint (this thread, never the audio thread): an instance that is
             frame = new (std::nothrow) uint32_t[width * height] {}; // never shown carries no picture
         if (frame == nullptr)
             return false;
         Raster r { frame, width };
-        draw (r, host);
+        if (canvasHeight == height)
+            draw (r, host);
+        else
+            drawFxStrip (r, host, canvasHeight);
         // The canvas holds the last picture drawn (unless `whole`): unchanged rows compared there, not hashed.
         bool same = ! whole;
-        for (int y = 0; same && y < height; ++y)
+        for (int y = 0; same && y < canvasHeight; ++y)
             same = std::memcmp (pixels + (size_t) y * (size_t) stride, frame + y * width, sizeof (uint32_t) * width) == 0;
         if (same)
             return false;
-        for (int y = 0; y < height; ++y)
+        for (int y = 0; y < canvasHeight; ++y)
             std::memcpy (pixels + (size_t) y * (size_t) stride, frame + y * width, sizeof (uint32_t) * width);
         return true;
     }
@@ -292,6 +295,7 @@ protected:
     virtual int groupCount() const = 0;
     virtual const Group& groupAt (int index) const = 0;
     virtual void read (uint32_t id, Value& out) const = 0;
+    virtual void drawFxStrip (Raster&, const Host&, int height) = 0;
     virtual void drawTitle (Raster&, const Host&) const = 0;
     virtual void drawStatus (Raster&, const Host&, int /* right */) {}                          // the header's right
     virtual void drawPanel (Raster&, const Host&, int /* x */, int /* y */, int /* w */, int /* h */) {}  // beside a list
@@ -480,8 +484,9 @@ private:
         }
     }
 
+protected:
     // K1-K3 under a tall picture: each its tag, label and value on one line, a bar under them.
-    void drawStrip (Raster& r, const Host& host)
+    void drawStrip (Raster& r, const Host& host, int y = stripY)
     {
         const Palette& c = colours;
         const Ink hi = accent (host);
@@ -490,7 +495,7 @@ private:
         const int w = (width - 8 - 8) / 3;
         for (int k = 0; k < 3; ++k)
         {
-            const int x = 4 + k * (w + 4), y = stripY;
+            const int x = 4 + k * (w + 4);
             cardFace (r, x, y, w, stripH);
             char tag[3] = { 'K', (char) ('1' + k), 0 };
             r.box (x, y, 17, 13, ids[k] != noParam ? hi : c.rule);
@@ -512,6 +517,7 @@ private:
         }
     }
 
+private:
     void drawLegend (Raster& r, const Host& host)
     {
         const char* lines[6];
