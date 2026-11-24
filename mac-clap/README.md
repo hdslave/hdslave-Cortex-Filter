@@ -2,6 +2,8 @@
 
 Separate desktop CLAP build of **hdslave Cortex Filter** for **FL Studio** (2024+) and any other CLAP host on macOS (Apple Silicon / Intel) and Windows (x64).
 
+![Cortex Filter morphing cubes and filter response during playback](assets/desktop-preview.gif)
+
 - **Multi-Screen MPC Dashboard:** displays all of hdslave Cortex Filter's native MPC screens simultaneously on one resizable Retina/HiDPI panel (with the hardware `K1`–`K3` footer panels removed) and direct mouse, trackpad, and touch control over every parameter, plot, sequencer, and pad.
 - **The same plug-in as the MPC build:** `src/` here is the MPC plug-in's `../src` plus this panel's own edits, so the sound, the parameters (46), the presets (15) and the saved state (version 2) are the MPC build's. The version the bundle reports is read from `src/params.h`, the same line the MPC build uses.
 - **Standalone from the MPC Sample build:** the build itself is this directory's own (`./build-macos.sh`, `./build-windows.ps1`); the MPC build stays `../build.sh`. GitHub releases remain MPC Sample-only for now while the desktop builds are being finalized.
