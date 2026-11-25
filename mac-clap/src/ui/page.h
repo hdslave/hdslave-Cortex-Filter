@@ -2,7 +2,7 @@
 // groups, K1-K3 cards and the controls. A plug-in derives its page from Page: its groups, how a parameter reads, and
 // the pictures only it can draw. Drawing and logic only: no threads, nothing but the standard library, and its one
 // picture taken from the heap at its first paint (so an instance never shown does not carry 279 KB for it); the
-// plug-in calls it from the main thread. Anvil's and TB-MPC-3-P-0's page, with one addition for Cortex Filter: a picture
+// plug-in calls it from the main thread. Anvil's and Slink's page, with one addition for Cortex Filter: a picture
 // group may take the whole body (tallCustom), K1-K3 then shown as a slim strip under it.
 //
 // The controls, as on hdslave Machine's page: the wheel moves the cursor a row; Push edits the row (the wheel then
