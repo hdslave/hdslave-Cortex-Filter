@@ -326,6 +326,23 @@ public:
     // reader. They never feed the sound, so this cannot move it.
     void bendMetering (bool on) { bendOn = on; }
 
+    // Whether the sound must go on running through silence to stay right; the plug-in then asks the host to run it.
+    // hdslaveOS lets an effect sleep once its input and output have been under -100 dB for half a second: it is not
+    // run at all then, so it counts no frames and cannot tell, when it wakes, how long it slept. The sequence does not
+    // keep it awake: it takes the song's place and tempo from the transport of the block it wakes in (transport()
+    // anchors again on any place but the one its frames lead to) and catches up on the clocks the song passed playing
+    // on (runClocks()), and hdslaveOS wakes it for a block whenever the transport starts, stops or jumps. Its limit:
+    // it never learns where the song had got to when such a block comes, so a loop going round, a locate back or a
+    // Stop during a rest leaves the sequence behind by the Inc and Dec clocks the song passed while it slept (a jump
+    // back fires only a clock it lands on, a Reset there lining it up; a Stop counts none, stepSequence() running no
+    // clocks stopped). It lines up again at a Reset, a Play or a new sequence. Counting them needs the host to tell
+    // where the song had got to (the loop points for a loop), which hdslaveOS does not yet. The envelope follower
+    // cannot wait: asleep it stops where it is, so Env Trigger would never re-arm and the next sound would start the
+    // point from there. While anything reads it, it runs until what it follows (Env Gain taken off) is under the
+    // host's own -100 dB; then the effect sleeps as before.
+    bool keepAwake() const { return envRead() && (env > envRest * envGainNow || envNorm != 0.0f); }
+    static constexpr float envRest = 1e-5f;
+
 private:
     float rate = 48000.0f;
     const float silence[controlFrames] {};
@@ -458,6 +475,13 @@ private:
 
     // The filter to hear: the sequence's while it runs and has loaded one, else the Filter parameter's.
     int targetSlot() const { return seq.on (store) && seq.filter > 0 ? seq.filter : manualSlot; }
+
+    // Whether anything reads the envelope follower: a depth on an axis (or one still gliding to 0), or Env Trigger.
+    bool envRead() const
+    {
+        return envDepthNow[0] != 0.0f || envDepthNow[1] != 0.0f || envDepthNow[2] != 0.0f || envDepth[0] != 0.0f
+            || envDepth[1] != 0.0f || envDepth[2] != 0.0f || envTrigMode != 0;
+    }
 
     // A glide's step; it lands on its value once close (or once a step is too small to move it in a float).
     static float glideTo (float now, float to, float coef)
@@ -665,8 +689,7 @@ private:
         // the filter and fast bass attacks don't inject 110 Hz FM ripple into cutoff.
         if (! (env < 1e30f))
             env = 0.0f;
-        const bool envNeeded = envDepthNow[0] != 0.0f || envDepthNow[1] != 0.0f || envDepthNow[2] != 0.0f || envDepth[0] != 0.0f
-                             || envDepth[1] != 0.0f || envDepth[2] != 0.0f || envTrigMode != 0;
+        const bool envNeeded = envRead();
         const float envDb = envNeeded ? std::clamp ((6.0206f * std::log2 (env + 1e-12f) - envFloorDb) / -envFloorDb, 0.0f, 1.0f) : 0.0f;
         envTrigNorm = envDb;
         envNorm = envNeeded ? glideTo (envNorm, envDb * envDb, envSmoothCoef) : 0.0f;

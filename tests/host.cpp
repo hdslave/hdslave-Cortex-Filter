@@ -112,10 +112,10 @@ struct Instance
     double rate = 48000.0;
     uint64_t played = 0; // frames rendered, for the transport
 
-    explicit Instance (double sampleRate = 48000.0, uint32_t maxFrames = 4096) : rate (sampleRate)
+    explicit Instance (double sampleRate = 48000.0, uint32_t maxFrames = 4096, const clap_host* with = &host) : rate (sampleRate)
     {
         const auto* d = factory->get_plugin_descriptor (factory, 0);
-        plugin = factory->create_plugin (factory, &host, d->id);
+        plugin = factory->create_plugin (factory, with, d->id);
         CHECK (plugin != nullptr && plugin->init (plugin));
         params = static_cast<const clap_plugin_params*> (plugin->get_extension (plugin, CLAP_EXT_PARAMS));
         state = static_cast<const clap_plugin_state*> (plugin->get_extension (plugin, CLAP_EXT_STATE));
@@ -773,6 +773,248 @@ void testSequencerGaps()
     }
 }
 
+// hdslaveOS's idle gate for an effect (src/melodee/plugin/idle_gate.h, as plugin_rack.cpp and clap_instance.cpp run
+// it): before each block the plug-in is skipped once its input and output have been under -100 dB for half a second,
+// unless the block's input is louder or the plug-in asked to be run (request_process: the host clears the wish as a
+// block starts, so one asked for during a block runs the next). Skipped, it is not called at all: it hears no
+// transport and counts no frames (steady_time stands still), and gives silence. The song moves on regardless.
+// `transportWakes`: hdslaveOS's change for this, a sleeping plug-in also run for the one block in which the transport
+// starts, stops or jumps (a locate, a loop going round told as a jump), hearing that block's transport; it does not
+// count the plug-in quiet again, so it sleeps from the next block unless something else wakes it.
+struct GatedHost
+{
+    clap_host host;
+    bool asked = false, transportWakes = true;
+    GatedHost()
+        : host { CLAP_VERSION, this, "Cortex Filter gated test host", "tests", "", "1", hostExtension, [] (const clap_host*) {},
+                 [] (const clap_host* h) { static_cast<GatedHost*> (h->host_data)->asked = true; }, [] (const clap_host*) {} }
+    {
+    }
+};
+struct SongAt
+{
+    bool playing;
+    double beats, bpm = 120.0;
+};
+// `in` through `a` in 128-frame blocks, the song as `song` tells it at each block's first frame; with `gate` (the
+// host `a` was made with), through the idle gate, `skipped` counting the blocks it slept.
+Stereo hosted (Instance& a, const Stereo& in, const std::function<SongAt (uint64_t)>& song, GatedHost* gate, int* skipped = nullptr)
+{
+    const size_t frames = in.l.size();
+    Stereo o { std::vector<float> (frames, 0.0f), std::vector<float> (frames, 0.0f) };
+    const uint32_t needed = (uint32_t) std::lround (0.5 * a.rate);
+    uint32_t quiet = 0;
+    uint64_t steady = 0;
+    auto loud = [] (const float* l, const float* r, size_t n) {
+        for (size_t i = 0; i < n; ++i)
+            if (std::fabs (l[i]) > 1e-5f || std::fabs (r[i]) > 1e-5f)
+                return true;
+        return false;
+    };
+    OutEvents ignored;
+    SongAt before { false, 0.0 };
+    for (size_t at = 0; at < frames; at += 128)
+    {
+        const uint32_t n = (uint32_t) std::min<size_t> (128, frames - at);
+        float* ins[2] = { const_cast<float*> (in.l.data()) + at, const_cast<float*> (in.r.data()) + at };
+        float* outs[2] = { o.l.data() + at, o.r.data() + at };
+        const SongAt now = song (at);
+        // Started, stopped, or somewhere other than where the last block's frames took the song.
+        const double expected = before.playing ? before.beats + 128.0 * before.bpm / 60.0 / a.rate : before.beats;
+        const bool changed = at > 0 && (now.playing != before.playing || std::fabs (now.beats - expected) > 1e-6);
+        before = now;
+        if (gate != nullptr)
+        {
+            const bool waking = gate->asked || loud (ins[0], ins[1], n);
+            if (waking)
+                quiet = 0;
+            if (! waking && quiet >= needed && ! (changed && gate->transportWakes))
+            {
+                if (skipped != nullptr)
+                    ++*skipped;
+                continue;
+            }
+            gate->asked = false;
+        }
+        clap_event_transport tr {};
+        tr.header = { sizeof (tr), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, 0 };
+        tr.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE | (now.playing ? CLAP_TRANSPORT_IS_PLAYING : 0);
+        tr.tempo = now.bpm;
+        tr.song_pos_beats = (clap_beattime) std::llround (now.beats * (double) CLAP_BEATTIME_FACTOR);
+        Events e;
+        clap_audio_buffer input {}, output {};
+        input.data32 = ins, input.channel_count = 2;
+        output.data32 = outs, output.channel_count = 2;
+        clap_process p {};
+        p.steady_time = (int64_t) steady;
+        p.frames_count = n;
+        p.transport = &tr;
+        p.audio_inputs = &input;
+        p.audio_inputs_count = 1;
+        p.audio_outputs = &output;
+        p.audio_outputs_count = 1;
+        p.in_events = &e.in;
+        p.out_events = &ignored.out;
+        CHECK (a.plugin->process (a.plugin, &p) != CLAP_PROCESS_ERROR);
+        steady += n;
+        if (gate != nullptr)
+            quiet = loud (outs[0], outs[1], n) ? 0 : std::min<uint32_t> (quiet + n, needed);
+    }
+    return o;
+}
+
+// Short noise bursts (30 ms, then exact silence) every `every` frames from the first.
+Stereo bursts (size_t frames, size_t every, float level)
+{
+    Stereo s = whiteNoise (frames, level, 7);
+    for (size_t i = 0; i < frames; ++i)
+        if (i % every >= 1440)
+            s.l[i] = s.r[i] = 0.0f;
+    return s;
+}
+
+// The effect as hdslaveOS runs it, sleeping through silence, against the same effect run every block.
+// - A sequence lets it sleep through a rest: woken by the sound coming back, or for a block by a transport change, it
+//   takes the song's place and tempo from the transport and catches up on the clocks the song passed playing on, so a
+//   second after the sound is back it is where it would have been awake (within 1e-3, as testSequencerGaps: the fades
+//   between filters differ until then). In a rest: a Stop and a Play from the top, a Play, the tempo changed, a locate
+//   forward, a 2-bar loop going round onto its Reset. Without the host's wake on the transport, a Stop and a Play in a
+//   rest are missed and the sequence is off. The known limit, held here so a change to it shows: with Reset Clock Off,
+//   a loop going round, a locate back or a Stop in the rest leaves it off after the rest (the Inc clocks the song
+//   passed while it slept are never counted; counting them needs the host to tell where the song had got to, a
+//   follow-up).
+// - The envelope follower keeps it awake while it falls and something reads it: Env Trigger re-arms through a rest
+//   (each of six hits steps the sequence, not only the first) and Env > Morph starts each hit from where the follower
+//   fell to, to the bit; once the follower is under -100 dB it sleeps again.
+// - With neither in use (a plain filter) it sleeps as before.
+void testIdleGate()
+{
+    const double rate = 48000.0;
+    const size_t second = 48000;
+    auto silenceFrom = [] (Stereo x, size_t from, size_t to) {
+        for (size_t i = from; i < to && i < x.l.size(); ++i)
+            x.l[i] = x.r[i] = 0.0f;
+        return x;
+    };
+    // How far the gated render is from the one run every block, from frame `from` (reported when `what` names it and
+    // they differ by more than `allowed`, or always with CORTEX_DEBUG set).
+    auto compare = [&] (const char* what, const std::function<void (Instance&)>& patch, const Stereo& in,
+                        const std::function<SongAt (uint64_t)>& song, int& skipped, size_t from = 0, float allowed = 0.0f,
+                        bool transportWakes = true) {
+        Instance through;
+        GatedHost gate;
+        gate.transportWakes = transportWakes;
+        Instance gated (rate, 4096, &gate.host);
+        patch (through), patch (gated);
+        const Stereo a = hosted (through, in, song, nullptr), b = hosted (gated, in, song, &gate, &skipped);
+        const float apart = maxDifference (a, b, from);
+        if ((apart > allowed || std::getenv ("CORTEX_DEBUG") != nullptr) && what != nullptr)
+            std::printf ("  %s: %g apart from it run every block (%d blocks asleep)\n", what, (double) apart, skipped);
+        return apart;
+    };
+    auto beatsFrom = [&] (double beats, size_t since, uint64_t at, double bpm = 120.0) { return beats + (double) (at - since) * bpm / 60.0 / rate; };
+
+    // Vowel Walk (a sequence on 1/8 clocks, reset every 2 bars) on a phrase with a rest from 2 s to 6 s, compared from
+    // 7 s.
+    const Stereo phrase = silenceFrom (loop (rate, 10.0), 2 * second, 6 * second);
+    auto vowelWalk = [] (Instance& a) { CHECK (a.loadPreset ("vowel-walk")); };
+    auto stopPlay = [&] (uint64_t at) -> SongAt {
+        if (at < 7 * second / 2) return { true, beatsFrom (0.0, 0, at) }; // from the top: beat 7 at 3.5 s
+        if (at < 9 * second / 2) return { false, 7.0 };                  // stopped a second
+        return { true, beatsFrom (0.0, 9 * second / 2, at) };           // Play from the top again
+    };
+    {
+        int skipped = 0;
+        CHECK (compare ("a Stop and a Play from the top in a rest", vowelWalk, phrase, stopPlay, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (skipped > 0);
+        skipped = 0; // the host as it was: no block for the transport
+        CHECK (compare ("the same without the host's wake", vowelWalk, phrase, stopPlay, skipped, 7 * second, 1.0f, false) > 1e-2f);
+    }
+    {
+        int skipped = 0;
+        const Stereo in = silenceFrom (loop (rate, 9.0), second, 5 * second);
+        auto song = [&] (uint64_t at) -> SongAt {
+            if (at < 2 * second) return { false, 0.0 };           // stopped at the top, the phrase heard
+            return { true, beatsFrom (0.0, 2 * second, at) };     // Play at 2 s, in the rest
+        };
+        CHECK (compare ("a Play in a rest", vowelWalk, in, song, skipped, 6 * second, 1e-3f) < 1e-3f);
+        CHECK (skipped > 0);
+    }
+    {
+        int skipped = 0;
+        auto song = [&] (uint64_t at) -> SongAt {
+            if (at < 3 * second) return { true, beatsFrom (0.0, 0, at) };
+            return { true, beatsFrom (6.0, 3 * second, at, 90.0), 90.0 }; // 90 bpm from 3 s (beat 6), no jump
+        };
+        CHECK (compare ("the tempo changed in a rest", vowelWalk, phrase, song, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (skipped > 0);
+    }
+    {
+        int skipped = 0;
+        auto song = [&] (uint64_t at) -> SongAt {
+            if (at < 7 * second / 2) return { true, beatsFrom (0.0, 0, at) };
+            return { true, beatsFrom (20.0, 7 * second / 2, at) }; // a locate to beat 20 at 3.5 s
+        };
+        CHECK (compare ("a locate forward in a rest", vowelWalk, phrase, song, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (skipped > 0);
+    }
+    {
+        int skipped = 0;
+        auto song = [&] (uint64_t at) -> SongAt { return { true, std::fmod (beatsFrom (0.0, 0, at), 8.0) }; }; // round at 4 s
+        CHECK (compare ("a loop round onto its Reset in a rest", vowelWalk, phrase, song, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (skipped > 0);
+    }
+    // The known limit, Reset Clock Off: a loop going round, a locate back to beat 1, and a Stop (the sound coming back
+    // stopped), each at 3.5 s in the rest.
+    {
+        auto noReset = [&] (Instance& a) { vowelWalk (a), a.setup ({ { "Reset Clock", 0 } }, 0.01); };
+        auto loopRound = [&] (uint64_t at) -> SongAt { return { true, std::fmod (beatsFrom (0.0, 0, at), 8.0) }; };
+        auto locateBack = [&] (uint64_t at) -> SongAt {
+            if (at < 7 * second / 2) return { true, beatsFrom (0.0, 0, at) };
+            return { true, beatsFrom (1.0, 7 * second / 2, at) };
+        };
+        auto stopIn = [&] (uint64_t at) -> SongAt {
+            if (at < 7 * second / 2) return { true, beatsFrom (0.0, 0, at) };
+            return { false, 7.0 };
+        };
+        int skipped = 0;
+        CHECK (compare ("a loop round in a rest, Reset Clock Off (the known limit)", noReset, phrase, loopRound, skipped, 7 * second, 1.0f) > 1e-2f);
+        CHECK (compare ("a locate back in a rest, Reset Clock Off (the known limit)", noReset, phrase, locateBack, skipped, 7 * second, 1.0f) > 1e-2f);
+        CHECK (compare ("a Stop in a rest, Reset Clock Off (the known limit)", noReset, phrase, stopIn, skipped, 7 * second, 1.0f) > 1e-2f);
+    }
+    // Six hits 6 s apart, the song stopped: Env Trigger stepping the Lowpasses with the longest release (it falls
+    // 6 dB under Trig Level about 4.6 s after a hit), and Env > Morph alone, no sequence.
+    const Stereo hits = bursts (36 * second, 6 * second, 0.5f);
+    auto stopped = [] (uint64_t) { return SongAt { false, 0.0 }; };
+    {
+        int skipped = 0;
+        auto trig = [] (Instance& a) {
+            a.setup ({ { "Sequence", 1 }, { "Inc Clock", 0 }, { "Env Trigger", 1 }, { "Trig Level", -20.0 }, { "Env Attack", 0.1 },
+                       { "Env Release", 1.0 } }, 0.01);
+        };
+        CHECK (compare ("Env Trigger through rests", trig, hits, stopped, skipped) == 0.0f && skipped == 0);
+    }
+    {
+        int skipped = 0;
+        auto morph = [] (Instance& a) {
+            a.setup ({ { "Filter", 2 }, { "Env > Morph", 1.0 }, { "Env Attack", 0.1 }, { "Env Release", 1.0 } }, 0.01);
+        };
+        CHECK (compare ("Env > Morph through rests", morph, hits, stopped, skipped) == 0.0f && skipped == 0);
+        // Then 40 s of silence: the follower falls under -100 dB (about 22 s at this release) and it sleeps.
+        Stereo tail = hits;
+        tail.l.resize (76 * second, 0.0f), tail.r.resize (76 * second, 0.0f);
+        skipped = 0;
+        compare (nullptr, morph, tail, stopped, skipped);
+        CHECK (skipped > 0);
+    }
+    // Neither in use (a filter, no sequence, no envelope depth): it sleeps in the rests as before.
+    {
+        int skipped = 0;
+        compare (nullptr, [] (Instance& a) { a.setup ({ { "Filter", 8 } }, 0.01); }, hits, stopped, skipped);
+        CHECK (skipped > 0);
+    }
+}
+
 // The page's presses fire at the next block only while fresh: one the sound did not take within half a second (it
 // was not running) is dropped, and stopping, resetting or deactivating the plug-in drops those not yet taken.
 void testPagePresses()
@@ -1269,6 +1511,7 @@ int main (int argc, char** argv)
     testRouting();
     testExtremes();
     testSequencerGaps();
+    testIdleGate();
     testPagePresses();
     testLatencyTailAndSleep();
     demos (folder);

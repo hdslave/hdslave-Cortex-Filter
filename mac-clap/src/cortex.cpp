@@ -669,6 +669,10 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
             if (meters[m] > p.feed.meters[m].load (std::memory_order_relaxed))
                 p.feed.meters[m].store (meters[m], std::memory_order_relaxed);
     }
+    // Asked for the next block whenever the engine must not sleep through what comes (Engine::keepAwake): the host
+    // runs it then, its input silent or not (hdslaveOS clears the wish as each block starts).
+    if (p.engine.keepAwake() && p.host->request_process != nullptr)
+        p.host->request_process (p.host);
     p.feed.blocks.fetch_add (1, std::memory_order_release);
     p.feed.frames.fetch_add (frames, std::memory_order_release);
     p.commands.tick (frames);

@@ -35,6 +35,17 @@ Comb, non-colliding Acid Twins, and stronger baseline levels).
 Env Attacks, 0 dB could still never fire, and it fires there now. It also refuses absurd song positions from a
 host and keeps the filter design's rate constants per thread. The sound is otherwise 0.3.0's to the bit.
 
+**Version 0.3.3** keeps the envelope follower right through silence. hdslaveOS lets a quiet effect sleep (it is not
+run at all, so it counts no time): the follower stopped where it was, so Env Trigger stopped re-arming and the next
+sound started the point from the stale envelope. Now, while the follower is still falling and something reads it,
+the plug-in asks hdslaveOS to keep running it (see [Cost](#cost)). The sequence lets it sleep: it takes the song's
+place and tempo from the transport when it wakes. For a Stop or a Play in a rest it needs an hdslaveOS that runs a
+sleeping effect for the block in which the transport starts, stops or jumps (being added to hdslaveOS; earlier
+builds miss them, and the sequence then runs off the song's grid until the next Play heard). One limit remains: a loop
+going round, a locate back, or a Stop during a rest leaves the sequence behind by the Inc and Dec clocks the song
+passed while the effect slept (a Reset clock falling where a loop or locate lands lines it up at once). It lines up
+again at a Reset, a Play or a new sequence. The sound is otherwise 0.3.2's to the bit.
+
 ## Signal flow
 
 ```
@@ -115,7 +126,7 @@ puts back the factory's filter, or empties one of yours.
 | Control | Range | What it does |
 |---|---|---|
 | Sequence | Off, 16 sequences | The sequence that picks the filter. Loading one (or starting the song) starts it at its first step |
-| Inc Clock, Dec Clock | Off, 8 Bars … 1/32 (with triplets) | An Inc (or Dec) each time the playing song crosses that grid: on the beat, the same steps for the same part of the song. After a gap (Melodee lets the effect sleep through a rest while the song plays on) or a jump forward it catches up, in order, so the sequence is where it would be had it played through; a jump back (a loop) fires it when the song lands on the grid |
+| Inc Clock, Dec Clock | Off, 8 Bars … 1/32 (with triplets) | An Inc (or Dec) each time the playing song crosses that grid: on the beat, the same steps for the same part of the song. After a gap (Melodee lets the effect sleep through a rest while the song plays on) or a jump forward it catches up, in order, so the sequence is where it would be had it played through; a jump back (a loop) fires it when the song lands on the grid. A Stop or a Play in a rest is heard if Melodee runs the sleeping effect for that block (see Version 0.3.3) |
 | Reset Clock | Off, 1 – 16 bars | A Reset on that grid. Inc and Dec on the same beat come first, so a sequence reset on the bar starts the bar on its first step. It catches up after a gap as Inc and Dec do, and a loop that starts on its grid resets each time round |
 | Env Trigger | Off, Inc, Dec, Reset | The envelope follower as a trigger: each time it rises through Trig Level, that input fires; it fires again once it has fallen 6 dB under it |
 | Trig Level | −48 – 0 dB | |
@@ -258,7 +269,8 @@ Hosts without this screen interface can use the CLAP parameter list.
 - **KNOBS, LFO, ENV, OUT**: the controls, the cube small beside them with the response under it.
 
 The header names the filter heard and the sequence's place (its step, or −P− and −H−, and a Fade scale other than x1),
-lit yellow for a moment by each trigger. While no sound runs Melodee lets the effect sleep:
+lit yellow for a moment by each trigger. While no sound runs (and the envelope follower has fallen silent) Melodee
+lets the effect sleep:
 the cube and meters settle, and the page shows where the knobs put the point. The CORTEX lettering ripples one pixel
 to either side on a 3.84-second loop. The O holds a clockwise spiral planet with a glint traveling around its ring. Both
 move while anything else on the page does or the song plays, and for 4 seconds after the page opens, an input, a knob
@@ -285,6 +297,13 @@ instruction a cycle):
 | Standing still | about 41,000 | 0.9 % |
 
 The page's input and output meters are worked out only while Melodee paints the page.
+
+Since 0.3.3 the effect does not sleep while the envelope follower is still falling with an Env depth or Env Trigger
+set: it asks Melodee to keep running it, so the follower falls as it would while sounding. Until what it follows is
+under −100 dB, a rest then costs what the table says (silence costs as much as sound) instead of nothing: about
+1.2 seconds after a full-scale sound at the default Env Release, about 23 seconds at the longest (at most about
+3.5 % of a core meanwhile, the worst case above). With the follower at rest or unread it sleeps as before, a
+sequence running or not.
 
 The left and right channels run side by side in one vector register, through a loop unrolled for the cube's band
 count. While the point moves, the filter is worked out again every 8 frames, with polynomial `exp2` and `tan`
@@ -343,7 +362,14 @@ tools/artifacts.sh  # what the 8-frame control steps add to a tone under a movin
   envelope, a gate, edit filter changes); Mix 0 giving the input back to the bit;
   a mono input, no input, the same buffers in and out; random settings changed every 64 frames on loud noise staying
   finite and under 2, then ringing down to nothing; a sequence after a rest asleep sounding as with the rest played
-  through, and a loop one Reset long sounding the same each pass; the page's presses dropped when stale or after a
+  through, and a loop one Reset long sounding the same each pass; Melodee's idle gate modelled block by block
+  (asleep after half a second under −100 dB, woken by input, by the plug-in's own request, and for one block by a
+  transport start, stop or jump): Vowel Walk sleeping through a rest with a Stop and a Play from the top in it, a
+  Play, a tempo change, a locate forward and a loop going round onto its Reset, and sounding a second after the rest
+  as with every block run (and off without the wake on the transport; off too, as the known limit, after a loop
+  going round, a locate back or a Stop in the rest, with Reset Clock Off); Env Trigger stepping a sequence through rests
+  and Env > Morph's follower sounding to the bit as with every block run, the effect sleeping again once the follower
+  is under −100 dB, and a plain filter sleeping as before; the page's presses dropped when stale or after a
   stop, reset or deactivation; and the page (its title moving for 4 seconds and then resting with no paints asked
   for, woken by an input or the page opening, the graphs
   follow the sound and the knobs, drawing a new frame every 40 ms of playback, its controls set the values the host hears, the wheel
