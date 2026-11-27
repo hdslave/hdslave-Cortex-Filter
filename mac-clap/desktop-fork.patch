@@ -34,7 +34,7 @@
              return;
 --- a/src/cortex.cpp
 +++ b/src/cortex.cpp
-@@ -812,9 +812,20 @@
+@@ -849,9 +849,20 @@
  
  const melodee_screen_t screenExtension { screenDraw, screenInput, screenControls };
  

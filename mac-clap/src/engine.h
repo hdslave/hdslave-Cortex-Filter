@@ -271,26 +271,33 @@ public:
         double loopStart = 0.0, loopEnd = 0.0;
     };
 
-    // The host let the sound sleep `frames` frames before this block: it ran no process calls, and CLAP's steady_time
-    // counted them (hdslaveOS from 0.8.3-hdslave.4; a host whose steady_time stands still asleep tells none, and the
-    // sound wakes as it did before). `now` is the transport of the block it wakes in; this comes before that block's
-    // events and transport(). The sound moves on as it would have, run every block through the silence: the control
-    // steps those frames held, the sequencer's clocks the song passed (replayed in order, bounded, as runClocks() does
-    // after a gap) and the LFO. Nothing loops here per frame or per step.
-    // hdslaveOS runs a sleeping effect for the block in which the transport starts, stops or jumps (a locate, the
-    // loop going round), so the song played on through the frames slept as it was, but for its tempo, which changes
-    // unheard. Where the song had got to by this block (`reached`) is then the first of these that lies where the song
-    // could have got to, at the tempo it slept at or the one now (give or take a 64th note and the host's MTC trim):
-    // - playing: the song's place now (it played on);
-    // - in its loop: the place before the loop went round, now's place plus the loop's length (it went round at this
-    //   block);
-    // - stopped: the place it stopped at, which the host holds;
-    // - else (a locate, back or forward): where its own frames lead, at the tempo it slept at.
-    // At the tempo it slept at, a place within a 64th note (the host's own jump tolerance) of where its frames lead is
-    // taken as that: exactly the place one run throughout counted. The clocks are counted up to the last control step
-    // before this block, at the place `reached` puts it. This block's transport() then tells the jump or the Stop, as
-    // one run throughout hears it.
-    void slept (uint64_t frames, const SongNow& now)
+    // The frames before this block that the host did not run the sound for, though CLAP's steady_time counted them
+    // (hdslaveOS from 0.8.3-hdslave.4: the idle gate's sleep, a bypassed slot, a frozen or empty track; a host whose
+    // steady_time stands still tells none, and the sound wakes as it did before). `now` is the transport of the block
+    // it wakes in and `block` that block's frames; this comes before the block's events and transport(). The sound
+    // moves on as it would have, run every block through those frames: the control steps they held, the sequencer's
+    // clocks the song passed and the LFO. The clocks are replayed in order, bounded as runClocks() bounds a gap (past
+    // maxReplay boundaries it skips whole laps: exact for one clock alone, and for both on a sequence without Pauses,
+    // Halts or Bumpers). Glides and a filter change's fades are not moved on: they go on from where they were. Nothing
+    // loops here per frame or per step.
+    // The clocks are counted only up to a place the waking transport bears out (`reached`). The tempo may have
+    // changed unheard, so the song could have got anywhere from where the tempo it slept at takes it to where the one
+    // now does, give or take a 64th note (the host's jump tolerance) and, up to a 32nd, its MTC trim. Borne out:
+    // - playing, the song's place now (it played on);
+    // - playing just past its loop's start, the place before the loop went round: now's plus the loop's length (it
+    //   went round at this block);
+    // - stopped, the place it stopped at, which the host holds (gated: anywhere forward, at any tempo).
+    // `gated`: the frames can only have been the idle gate's sleep (the sound was quiet for as long as the gate waits,
+    // before them). hdslaveOS runs a sleeping effect for the block in which the transport starts, stops or jumps, so
+    // then nothing but the tempo changed before this block: a place not borne out is a jump at this block, and the
+    // clocks are counted to where its own frames lead, at the tempo it slept at. Otherwise (a bypass, a frozen track,
+    // a host that skips calls) the song may have done anything unheard, and with nothing borne out no clock is
+    // counted: the block's transport takes the sound on from the song's place, as 0.3.3 did.
+    // A place within 1e-6 beats of where its frames lead at the tempo it slept at (a Stop's: a 64th note, as the place
+    // it holds can lag the block) is taken as that: exactly the place one run throughout counted. The clocks are
+    // counted up to the last control step before this block; its transport() then tells the jump or the Stop, as one
+    // run throughout hears it.
+    void slept (uint64_t frames, const SongNow& now, uint32_t block, bool gated)
     {
         frames = std::min (frames, maxSlept);
         if (frames == 0)
@@ -300,50 +307,71 @@ public:
         if (steps > 0)
         {
             const uint64_t first = frame + untilTick, last = first + (steps - 1) * controlFrames;
-            bool own = true; // the last step's place is where its own frames lead
+            // The song's line at the tempo it slept at: the synced LFO's after a Stop not at this block (stopped, it runs
+            // on at the tempo from where the song was, so a Stop does not move it).
+            const double lineAt = songBeatsAt (last), linePerFrame = beatsPerFrame;
+            bool count = true, own = true; // the clocks counted; to where its own frames lead
             double lastPlace = 0.0, perFrame = beatsPerFrame;
             if (songPlaying)
             {
                 const double bpm = std::isfinite (now.bpm) ? std::clamp (now.bpm, 1.0, 1000.0) : 120.0;
                 perFrame = bpm / 60.0 / (double) rate;
                 const double from = songBeatsAt (frame), along = songBeatsAt (wake), byNow = from + (double) frames * perFrame;
-                // How far off the song may be and still have played on: the host's own jump tolerance (a 64th note)
-                // and its speed trim following MTC (half a percent).
-                const double jump = 1.0 / 16.0, slack = jump + 0.005 * (double) frames * std::max (perFrame, beatsPerFrame);
-                const double lo = std::min (along, byNow) - slack, hi = std::max (along, byNow) + slack;
+                const double jump = 1.0 / 16.0, trim = std::min (0.005 * (double) frames * std::max (perFrame, beatsPerFrame), 1.0 / 32.0);
+                const double lo = std::min (along, byNow) - jump - trim, hi = std::max (along, byNow) + jump + trim;
                 auto fits = [&] (double place) { return place >= lo && place <= hi; };
                 const bool placed = now.placed && std::isfinite (now.beats) && std::fabs (now.beats) <= 1e12;
-                double reached = along;
-                bool told = true;
-                if (placed && now.playing && fits (now.beats))
-                    reached = now.beats;
-                else if (placed && now.playing && now.looping && std::isfinite (now.loopStart) && std::isfinite (now.loopEnd)
-                         && now.loopEnd > now.loopStart && now.beats >= now.loopStart && now.beats < now.loopEnd
-                         && fits (now.beats + (now.loopEnd - now.loopStart)))
-                    reached = now.beats + (now.loopEnd - now.loopStart);
-                else if (placed && ! now.playing && fits (now.beats))
-                    reached = now.beats;
-                else
-                    told = false;
-                // At the tempo it slept at and within the host's jump tolerance of it, the place its own frames lead
-                // to is the one a run throughout counted, to the bit.
-                own = ! told || (perFrame == beatsPerFrame && std::fabs (reached - along) <= jump);
-                if (! own) // never behind the first step's place: the clocks run forward through a sleep
-                    lastPlace = std::max (reached - (double) (wake - last) * perFrame, songBeatsAt (first));
+                const double length = now.looping && std::isfinite (now.loopStart) && std::isfinite (now.loopEnd) && now.loopEnd > now.loopStart
+                                          ? now.loopEnd - now.loopStart : 0.0;
+                double reached = along, within = 1e-6;
+                bool told = false;
+                if (placed && now.playing)
+                {
+                    if (fits (now.beats))
+                        reached = now.beats, told = true;
+                    else if (length > 0.0 && now.beats >= now.loopStart && now.beats < now.loopEnd
+                             && now.beats - now.loopStart <= (double) block * perFrame + jump && fits (now.beats + length))
+                        reached = now.beats + length, told = true;
+                }
+                else if (placed)
+                {
+                    const double most = gated ? from + (double) frames * (1000.0 / 60.0 / (double) rate) + jump : hi;
+                    if (now.beats >= from - jump && now.beats <= most)
+                        reached = now.beats, told = true, within = jump;
+                }
+                own = ! told || (perFrame == beatsPerFrame && std::fabs (reached - along) <= within);
+                count = told || gated;
+                if (! own)
+                {
+                    // The last step's place as one run throughout had it: the place told at the block before this one
+                    // (back from `reached` at the song's own pace: playing on at the tempo it slept at, its pace
+                    // through the frames, which holds its drift off that tempo; at a new tempo or up to a Stop, the
+                    // tempo's), counted on at the tempo to the step. Never behind the first step's: the clocks run
+                    // forward through a sleep.
+                    const double pace = now.playing && perFrame == beatsPerFrame ? std::max (0.0, (reached - from) / (double) frames) : perFrame;
+                    lastPlace = wake - last <= block ? reached - (double) block * pace + (double) (last + block - wake) * perFrame
+                                                     : reached - (double) (wake - last) * pace;
+                    lastPlace = std::max (lastPlace, songBeatsAt (first));
+                }
             }
-            if (steps > 1)
+            if (count)
             {
-                frame = first;
-                stepSequence(); // anything left waiting from the block before the sleep, and the clocks to here
+                if (steps > 1)
+                {
+                    frame = first;
+                    stepSequence(); // anything left waiting from the block before the sleep, and the clocks to here
+                }
+                if (! own)
+                    anchorBeats = lastPlace, anchorFrame = last, beatsPerFrame = perFrame;
+                frame = last;
+                stepSequence();
             }
-            if (! own)
-                anchorBeats = lastPlace, anchorFrame = last, beatsPerFrame = perFrame;
-            frame = last;
-            stepSequence();
-            // The LFO as tick() moves it: synced and playing, from the song's place at the last step; else counted on.
+            // The LFO as tick() moves it: synced and playing, from the song's place at the last step (a Stop not
+            // borne out at this block: its line at the tempo it slept at); else counted on.
             const double beatsLong = lfoSyncBeats[syncIndex];
+            const bool line = ! gated && ! now.playing;
             if (beatsLong > 0.0 && songPlaying)
-                lfoCycles = songBeatsAt (last) / beatsLong + (double) controlFrames * beatsPerFrame / beatsLong;
+                lfoCycles = (line ? lineAt : songBeatsAt (last)) / beatsLong + (double) controlFrames * (line ? linePerFrame : beatsPerFrame) / beatsLong;
             else
                 lfoCycles += (double) steps * (beatsLong > 0.0 ? (double) controlFrames * beatsPerFrame / beatsLong : (double) lfoStep);
             if (lfoCycles > 1e9)
@@ -633,7 +661,7 @@ private:
             const float stall = attackCoef > 0.0f ? 5.4e-9f / attackCoef : 0.0f;
             const float level = std::min ((trigLevelDb - envFloorDb) / -envFloorDb, 1.0f - std::max (1e-4f, 2.0f * stall)),
                         again = std::max (0.0f, level - trigHysteresisDb / -envFloorDb);
-            if (envArmed && envTrigNorm >= level)
+            if (envArmed && envTrigNorm >= level && envTrigNorm > 0.0f) // silence (under the floor) never fires
                 ++fire[envTrigMode - 1], envArmed = false;
             else if (! envArmed && envTrigNorm <= again)
                 envArmed = true;
@@ -657,6 +685,11 @@ private:
     void runClocks (uint32_t fire[3])
     {
         const double place = songBeatsAt (frame);
+        // A step back by less than a 64th note (the host's jump tolerance: a block's place off its line, a swung or
+        // held tick) is not a locate: the clocks hold where they got to until the song is past it again, so no
+        // boundary fires twice.
+        if (place < clockPlace && clockPlace - place < 1.0 / 16.0 && (clockKnown[0] || clockKnown[1] || clockKnown[2]))
+            return;
         const double lengths[3] = { clockBeats[clock[0]], clockBeats[clock[1]], resetBeats[clock[2]] };
         const bool back = place < clockPlace;
         clockPlace = place;
@@ -703,6 +736,7 @@ private:
         };
         if (count() == 0)
             return; // most steps: no boundary
+        const int64_t passed = count();
         if (count() > maxReplay && to[2] > from[2])
         {
             int64_t r = to[2] - 1 > from[2] ? to[2] - 1 : to[2], start[2] = { from[0], from[1] };
@@ -731,6 +765,7 @@ private:
                 skipTo (end - maxReplay * ticks[0] * ticks[1] / (ticks[0] + ticks[1]), from); // both clocks: one alone laps sooner
             }
         }
+        triggers += (uint32_t) (uint64_t) (passed - count()); // the boundaries skipped count as triggers too (the page's)
         for (;;)
         {
             int64_t at = INT64_MAX;
