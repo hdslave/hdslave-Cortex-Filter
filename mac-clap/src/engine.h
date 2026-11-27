@@ -253,6 +253,12 @@ public:
         placed = placed && std::isfinite (beats) && std::fabs (beats) <= 1e12;
         const double perFrame = bpm / 60.0 / (double) rate;
         const bool now = playing && placed;
+        if (now) // the song's line (for slept()): from where it started, jumped or changed tempo, to the place told now
+        {
+            if (lineAgain || ! songPlaying || perFrame != beatsPerFrame || std::fabs (beats - songBeatsAt (frame)) > 1.0 / 16.0)
+                lineBeats = beats, lineFrame = frame, lineAgain = false;
+            toldBeats = beats, toldFrame = frame;
+        }
         if (now && (! songPlaying || perFrame != beatsPerFrame || std::fabs (beats - songBeatsAt (frame)) > 1e-6))
             anchorBeats = beats, anchorFrame = frame; // started, jumped or a new tempo
         if (now && ! songPlaying)
@@ -282,7 +288,8 @@ public:
     // loops here per frame or per step.
     // The clocks are counted only up to a place the waking transport bears out (`reached`). The tempo may have
     // changed unheard, so the song could have got anywhere from where the tempo it slept at takes it to where the one
-    // now does, give or take a 64th note (the host's jump tolerance) and, up to a 32nd, its MTC trim. Borne out:
+    // now does, or where its own pace before the sleep takes it (a host off its tempo by MTC's trim), give or take a
+    // 64th note (the host's jump tolerance) and, up to a 32nd, more trim. Borne out:
     // - playing, the song's place now (it played on);
     // - playing just past its loop's start, the place before the loop went round: now's plus the loop's length (it
     //   went round at this block);
@@ -317,8 +324,17 @@ public:
                 const double bpm = std::isfinite (now.bpm) ? std::clamp (now.bpm, 1.0, 1000.0) : 120.0;
                 perFrame = bpm / 60.0 / (double) rate;
                 const double from = songBeatsAt (frame), along = songBeatsAt (wake), byNow = from + (double) frames * perFrame;
+                // At the same tempo, the song's own pace as its line told it, when that line is a second or more long
+                // and its pace within MTC's trim of the tempo's: a host's place drifting off the tempo goes on so.
+                double drifted = along;
+                if (perFrame == beatsPerFrame && toldFrame > lineFrame && toldFrame - lineFrame >= (uint64_t) rate && toldFrame <= frame)
+                {
+                    const double pace = (toldBeats - lineBeats) / (double) (toldFrame - lineFrame);
+                    if (pace >= 0.99 * beatsPerFrame && pace <= 1.01 * beatsPerFrame)
+                        drifted = toldBeats + (double) (wake - toldFrame) * pace;
+                }
                 const double jump = 1.0 / 16.0, trim = std::min (0.005 * (double) frames * std::max (perFrame, beatsPerFrame), 1.0 / 32.0);
-                const double lo = std::min (along, byNow) - jump - trim, hi = std::max (along, byNow) + jump + trim;
+                const double lo = std::min ({ along, byNow, drifted }) - jump - trim, hi = std::max ({ along, byNow, drifted }) + jump + trim;
                 auto fits = [&] (double place) { return place >= lo && place <= hi; };
                 const bool placed = now.placed && std::isfinite (now.beats) && std::fabs (now.beats) <= 1e12;
                 const double length = now.looping && std::isfinite (now.loopStart) && std::isfinite (now.loopEnd) && now.loopEnd > now.loopStart
@@ -362,7 +378,10 @@ public:
                     stepSequence(); // anything left waiting from the block before the sleep, and the clocks to here
                 }
                 if (! own)
+                {
+                    lineAgain |= perFrame != beatsPerFrame; // the song's line starts again at the next place told
                     anchorBeats = lastPlace, anchorFrame = last, beatsPerFrame = perFrame;
+                }
                 frame = last;
                 stepSequence();
             }
@@ -501,6 +520,11 @@ private:
     uint64_t frame = 0, anchorFrame = 0; // frames rendered since activation; the one the song's place was taken at
     uint32_t untilTick = 0;
     double songBeatsAt (uint64_t at) const { return anchorBeats + (double) (at - anchorFrame) * beatsPerFrame; }
+    // The song's line as the host told it: where it last started, jumped by more than a 64th note or changed tempo,
+    // and the place told last. Over a second or more of it, its pace is the host's own: off the tempo by MTC's trim.
+    double lineBeats = 0.0, toldBeats = 0.0;
+    uint64_t lineFrame = 0, toldFrame = 0;
+    bool lineAgain = true; // a new line from the next place told (after a sleep across a tempo change)
     bool driving = false, distorting = false, splitNow = false, designed = false, ramping = false, snapCoefs = true, tailLpNow = false;
     Position pointL, pointR, designedL, designedR;
     int designedCube = -2;
