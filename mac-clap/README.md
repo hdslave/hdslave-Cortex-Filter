@@ -17,7 +17,7 @@ cd mac-clap
 ./sync-from-mpc.sh
 ```
 
-It copies `../src` over `src/`, applies the patch, and stops if a hunk no longer fits (a changed region needs the patch updated, not a half-copied tree), then builds and runs the host test. Currently synced to **0.3.3**.
+It copies `../src` over `src/`, applies the patch, and stops if a hunk no longer fits (a changed region needs the patch updated, not a half-copied tree), then builds and runs the host test. Currently synced to **0.3.4**.
 
 ## Build & Install (macOS)
 
