@@ -930,8 +930,9 @@ void testClockGaps()
 // round (told by its ends; late inside a block; after a tempo change too). The LFO lands on the same place: to the bit
 // free and synced while the song plays, within 1e-9 of a cycle synced with the song stopped (a product against a sum).
 // The review's cases, each against its failure:
-// - a host whose place runs 0.3 % slow of its tempo (MTC's trim), Inc 1/32, rests of about 10 beats; and 0.3 % fast,
-//   an 8-beat loop with a 1-bar Reset going round: every wake lands (a 64th note's tolerance had them off by one);
+// - a host whose place runs 0.3 % slow or fast of its tempo (MTC's trim), Inc 1/32, rests of about 10 beats and 40
+//   (past a 32nd note's drift, slow had them a step ahead); and 0.3 % fast, an 8-beat loop with a 1-bar Reset going
+//   round: every wake lands (a 64th note's tolerance had them off by one);
 // - a locate back by 1.5 beats after a 200 s rest (the MTC allowance once grew with the rest and took it for the song
 //   playing on);
 // - the tempo up from 120 to 160 and down to 125 in a rest, then a Stop (where the song stopped tells it all);
@@ -1035,16 +1036,19 @@ void testSlept()
                                                             { ParamId::resetClock, 0 } };
     const std::vector<std::pair<uint32_t, float>> inc8 = { { ParamId::sequence, 10 }, { ParamId::incClock, 9 }, { ParamId::decClock, 0 },
                                                            { ParamId::resetClock, 0 } };
-    // A host whose place runs 0.3 % slow of its tempo: 64 rests of about 10 beats.
-    {
-        int off = 0;
-        const SongFn slow = [&] (uint64_t f) { return song (true, 0.997 * (double) f / beat); };
-        for (int k = 0; k < 64; ++k)
-            off += same (nullptr, inc32, slow, at (2.3 * beat), at ((12.0 + k * 0.0137) * beat), 128, true, lfoUnchecked) ? 0 : 1;
-        if (off != 0)
-            std::printf ("  slept, the place 0.3 %% slow: %d of 64 wakes off\n", off);
-        CHECK (off == 0);
-    }
+    // A host whose place runs 0.3 % slow or fast of its tempo: 64 rests of about 10 beats, and of about 40 (its drift
+    // past what a 32nd note allows: the song's own pace before the rest is followed).
+    for (const double pace : { 0.997, 1.003 })
+        for (const double rest : { 10.0, 40.0 })
+        {
+            int off = 0;
+            const SongFn drifting = [&] (uint64_t f) { return song (true, pace * (double) f / beat); };
+            for (int k = 0; k < 64; ++k)
+                off += same (nullptr, inc32, drifting, at (2.3 * beat), at ((2.0 + rest + k * 0.0137) * beat), 128, true, lfoUnchecked) ? 0 : 1;
+            if (off != 0)
+                std::printf ("  slept, the place at %.3f of its tempo, rests of %.0f beats: %d of 64 wakes off\n", pace, rest, off);
+            CHECK (off == 0);
+        }
     // 0.3 % fast, an 8-beat loop with a 1-bar Reset: 40 wakes as the loop goes round, told in the block after.
     {
         int off = 0;

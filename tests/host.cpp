@@ -1058,6 +1058,79 @@ void testIdleGate()
         CHECK (compare ("bypassed, a Stop in it", noReset, phrase, stopAt3, skipped, after, 1e-3f, true, true, bypass) < 1e-3f);
         CHECK (compare ("bypassed, a locate back in it (the limit)", noReset, phrase, backAt3, skipped, after, 1.0f, true, true, bypass) > 1e-2f);
     }
+    // The plug-in's count of quiet against the host's (the review's three cases, each against its failure):
+    // - one input sample just over -100 dB (1.2e-5) at 2.5 s, its block's output under it: the host counts that block
+    //   quiet, and the sleep that follows still lands a locate back;
+    // - never asleep, kept awake by an 8-beat loop's turns (a transport change each 4 s) or by Env > Morph's falling
+    //   follower (its own request_process), then bypassed with 12 s and 15 s of quiet behind it, the song stopping in
+    //   the bypass and put back to the top: no sleep, so nothing counted, with that one sample before the bypass or
+    //   not (the host's count restarted at each of those, and taking the bypass for a sleep counted 10 s of play);
+    //   with a plain Stop in the bypass instead, each lands as run every block.
+    {
+        auto rendered = [&] (const std::function<void (Instance&)>& patch, const Stereo& in, const std::function<SongAt (uint64_t)>& song,
+                             const std::function<bool (uint64_t)>& bypassed, bool gated) {
+            GatedHost gate;
+            gate.bypassed = bypassed;
+            Instance a (rate, 4096, gated ? &gate.host : &host);
+            patch (a);
+            int skipped = 0;
+            return hosted (a, in, song, gated ? &gate : nullptr, &skipped);
+        };
+        auto ticked = [] (Stereo x, size_t at) { x.l[at] = x.r[at] = 1.2e-5f; return x; };
+        auto none = [] (uint64_t) { return false; };
+        auto locateBack = [&] (uint64_t at) -> SongAt {
+            if (at < s (14.5)) return { true, beatsFrom (0.0, 0, at) };
+            return { true, beatsFrom (1.0, s (14.5), at) };
+        };
+        const Stereo tickedPhrase = ticked (phrase, s (2.5) + 5);
+        const float tickApart = maxDifference (rendered (noReset, tickedPhrase, locateBack, none, false),
+                                               rendered (noReset, tickedPhrase, locateBack, none, true), after);
+        if (tickApart >= 1e-3f)
+            std::printf ("  a locate back in a rest, one 1.2e-5 input sample at 2.5 s: %g apart from it run every block\n", (double) tickApart);
+        CHECK (tickApart < 1e-3f);
+        struct Case
+        {
+            const char* what;
+            std::function<void (Instance&)> patch;
+            double seconds, rest, bypassFrom, stopAt, stopBeats;
+            bool looped;
+        };
+        const Case cases[] = {
+            { "kept awake by the loop's turns", noReset, 40.0, 34.0, 14.0, 15.0, 6.0, true },
+            { "kept awake by the follower", [&] (Instance& a) {
+                  noReset (a);
+                  a.setup ({ { "Env > Morph", 1.0 }, { "Env Attack", 0.1 }, { "Env Release", 1.0 } }, 0.01);
+              }, 50.0, 44.0, 17.0, 18.0, 36.0, false },
+        };
+        for (const Case& c : cases)
+        {
+            const Stereo plain = silenceFrom (loop (rate, c.seconds), 2 * second, s (c.rest));
+            const Stereo tick = ticked (plain, s (c.bypassFrom - 0.05));
+            auto bypass = [&] (uint64_t at) { return at >= s (c.bypassFrom) && at < s (c.bypassFrom + 10.0); };
+            auto playing = [&] (uint64_t at) -> SongAt {
+                const double beats = beatsFrom (0.0, 0, at);
+                return c.looped ? SongAt { true, std::fmod (beats, 8.0), 120.0, true, 0.0, 8.0 } : SongAt { true, beats };
+            };
+            auto stopThenTop = [&] (uint64_t at) -> SongAt {
+                if (at < s (c.stopAt)) return playing (at);
+                return { false, at < s (c.stopAt + 1.0) ? c.stopBeats : 0.0 };
+            };
+            auto stop = [&] (uint64_t at) -> SongAt { return at < s (c.stopAt) ? playing (at) : SongAt { false, c.stopBeats }; };
+            const size_t from = s (c.rest + 1.0);
+            const float apart = maxDifference (rendered (c.patch, plain, stopThenTop, bypass, true), rendered (c.patch, tick, stopThenTop, bypass, true), from);
+            if (apart >= 1e-3f)
+                std::printf ("  %s, bypassed, a Stop then the top: %g apart with one input sample before the bypass and without\n", c.what, (double) apart);
+            CHECK (apart < 1e-3f);
+            const Stereo through = rendered (c.patch, plain, stop, bypass, false);
+            for (const Stereo* in : { &plain, &tick })
+            {
+                const float off = maxDifference (through, rendered (c.patch, *in, stop, bypass, true), from);
+                if (off >= 1e-3f)
+                    std::printf ("  %s, bypassed, a Stop: %g apart from it run every block\n", c.what, (double) off);
+                CHECK (off < 1e-3f);
+            }
+        }
+    }
     // The LFO through the same rest, the song stopped: free (0.63 Hz) on Freq, and synced to 1/4T, which runs on at the
     // tempo while the song is stopped.
     {
