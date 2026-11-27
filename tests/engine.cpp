@@ -923,12 +923,22 @@ void testClockGaps()
 }
 
 // Engine::slept, as the plug-in calls it when the host's steady_time tells frames it did not run: the sound moves on
-// as one run every block through the same silence. In blocks of 128 and of 100 frames (so the sleep can end inside a
+// as one run every block through the same frames. In blocks of 128 and of 100 frames (so a gap can end inside a
 // control step), the sequencer (Inc 1/8, Dec 1/16T, Reset Off: every clock the song passed counts) lands on the same
-// step with the same count of triggers: the song playing on, its tempo changed while it slept, a Stop held where it
-// stopped, a locate back, the loop going round (told by its ends; late inside a block; after a tempo change too). The
-// LFO lands on the same place: to the bit free and synced while the song plays, within 1e-9 of a cycle synced with
-// the song stopped (a product against a sum). An absurd sleep leaves everything finite.
+// step with the same count of triggers after the idle gate's sleep (`gated`: nothing but the tempo changed before the
+// waking block): the song playing on, its tempo changed, a Stop held where it stopped, a locate back, the loop going
+// round (told by its ends; late inside a block; after a tempo change too). The LFO lands on the same place: to the bit
+// free and synced while the song plays, within 1e-9 of a cycle synced with the song stopped (a product against a sum).
+// The review's cases, each against its failure:
+// - a host whose place runs 0.3 % slow of its tempo (MTC's trim), Inc 1/32, rests of about 10 beats; and 0.3 % fast,
+//   an 8-beat loop with a 1-bar Reset going round: every wake lands (a 64th note's tolerance had them off by one);
+// - a locate back by 1.5 beats after a 200 s rest (the MTC allowance once grew with the rest and took it for the song
+//   playing on);
+// - the tempo up from 120 to 160 and down to 125 in a rest, then a Stop (where the song stopped tells it all);
+// - not gated (a bypass or a frozen track: no block for the transport), 60 s with the song stopped 1 s in, and the
+//   loop going round seven times: the Stop's place bears out the count; the loop does not, and no clock is counted
+//   (where 0.3.4 first counted the whole gap as played on).
+// An absurd sleep leaves everything finite.
 void testSlept()
 {
     using SongFn = std::function<Engine::SongNow (uint64_t)>;
@@ -958,28 +968,30 @@ void testSlept()
         s.looping = true, s.loopStart = from, s.loopEnd = to;
         return s;
     };
-    // `a` run throughout and `b` asleep from `sleep` to `wake` (block edges), then both a block on.
-    auto compare = [&] (const char* what, const std::vector<std::pair<uint32_t, float>>& values, const SongFn& tell, uint64_t sleep,
-                        uint64_t wake, uint32_t block, bool lfoExact = true) {
+    // `a` run throughout and `b` not run from `sleep` to `wake` (block edges), then both a block on: whether they land
+    // on the same step with the same triggers (shown when `what` names it and they do not).
+    enum Lfo { lfoUnchecked, lfoExact, lfoNear };
+    auto same = [&] (const char* what, const std::vector<std::pair<uint32_t, float>>& values, const SongFn& tell, uint64_t sleep,
+                     uint64_t wake, uint32_t block, bool gated, Lfo lfo = lfoExact) {
         Engine a, b;
         made (a, values), made (b, values);
         play (a, 0, wake, tell, block);
         play (b, 0, sleep, tell, block);
-        b.slept (wake - sleep, tell (wake));
-        if (lfoExact)
+        b.slept (wake - sleep, tell (wake), block, gated);
+        if (lfo == lfoExact)
             CHECK (a.lfoPlace() == b.lfoPlace());
-        else
+        else if (lfo == lfoNear)
             NEAR (a.lfoPlace(), b.lfoPlace(), 1e-9);
         play (a, wake, wake + block, tell, block);
         play (b, wake, wake + block, tell, block);
         const Sequencer &x = a.sequencer(), &y = b.sequencer();
-        const bool same = x.pos == y.pos && x.mode == y.mode && x.filter == y.filter && a.triggerCount() == b.triggerCount();
-        if (! same)
+        const bool landed = x.pos == y.pos && x.mode == y.mode && x.filter == y.filter && a.triggerCount() == b.triggerCount();
+        if (! landed && what != nullptr)
             std::printf ("  slept, %s: step %d (%u triggers) against %d (%u) run throughout\n", what, y.pos + 1, b.triggerCount(), x.pos + 1,
                          a.triggerCount());
-        CHECK (same);
-        if (lfoExact)
+        if (lfo == lfoExact)
             CHECK (a.lfoPlace() == b.lfoPlace());
+        return landed;
     };
     const std::vector<std::pair<uint32_t, float>> clocks = { { ParamId::sequence, 10 }, { ParamId::incClock, 9 }, { ParamId::decClock, 12 },
                                                              { ParamId::resetClock, 0 } };
@@ -988,41 +1000,162 @@ void testSlept()
         auto at = [block] (double frames) { return (uint64_t) (frames / block) * block; }; // the block edge at or before
         const uint64_t sleep = at (2.3 * beat), late = at (9.6 * beat);
         auto on = [&] (uint64_t f) { return song (true, (double) f / beat); };
-        compare ("playing on", clocks, on, sleep, late, block);
+        CHECK (same ("playing on", clocks, on, sleep, late, block, true));
+        CHECK (same ("playing on, not gated", clocks, on, sleep, late, block, false));
         const uint64_t change = at (4.1 * beat); // to 90 bpm there, unheard asleep
         auto slower = [&] (uint64_t f) {
             return f < change ? on (f) : song (true, (double) change / beat + (double) (f - change) / beat * 0.75, 90.0);
         };
-        compare ("the tempo changed", clocks, slower, sleep, late, block);
+        CHECK (same ("the tempo changed", clocks, slower, sleep, late, block, true));
         const uint64_t stop = at (6.2 * beat);
-        compare ("a Stop", clocks, [&] (uint64_t f) { return f < stop ? on (f) : song (false, (double) stop / beat); }, sleep, stop, block);
-        compare ("a Stop after the tempo changed", clocks,
-                 [&] (uint64_t f) { return f < stop ? slower (f) : song (false, slower (stop).beats, 90.0); }, sleep, stop, block);
-        compare ("a locate back", clocks, [&] (uint64_t f) { return f < stop ? on (f) : song (true, 1.0 + (double) (f - stop) / beat); }, sleep,
-                 stop, block);
+        CHECK (same ("a Stop", clocks, [&] (uint64_t f) { return f < stop ? on (f) : song (false, (double) stop / beat); }, sleep, stop, block, true));
+        CHECK (same ("a Stop after the tempo changed", clocks,
+                     [&] (uint64_t f) { return f < stop ? slower (f) : song (false, slower (stop).beats, 90.0); }, sleep, stop, block, true));
+        CHECK (same ("a locate back", clocks, [&] (uint64_t f) { return f < stop ? on (f) : song (true, 1.0 + (double) (f - stop) / beat); },
+                     sleep, stop, block, true));
         // A loop from beat 0 to 8, the song started at beat 0.37: it goes round inside a block of 100, told at the next.
         auto round = [&] (uint64_t f) { return looped (song (true, std::fmod (0.37 + (double) f / beat, 8.0)), 0.0, 8.0); };
         const uint64_t turn = at ((8.0 - 0.37) * beat + block - 1);
-        compare ("the loop going round", clocks, round, sleep, turn, block);
+        CHECK (same ("the loop going round", clocks, round, sleep, turn, block, true));
+        CHECK (same ("the loop going round, not gated", clocks, round, sleep, turn, block, false));
         auto slowerRound = [&] (uint64_t f) {
             const Engine::SongNow s = slower (f);
             return looped (song (true, std::fmod (s.beats, 8.0), s.bpm), 0.0, 8.0);
         };
         const uint64_t slowerTurn = at ((double) change + (8.0 - (double) change / beat) * beat / 0.75 + block - 1);
-        compare ("the loop going round after the tempo changed", clocks, slowerRound, sleep, slowerTurn, block);
+        CHECK (same ("the loop going round after the tempo changed", clocks, slowerRound, sleep, slowerTurn, block, true));
         // The LFO: free, the song stopped; synced to 1/4T, playing and stopped.
         auto stopped = [&] (uint64_t) { return song (false, 0.0); };
-        compare ("a free LFO", { { ParamId::lfoRate, 0.5f } }, stopped, sleep, late, block);
-        compare ("a synced LFO, playing", { { ParamId::lfoSync, 8 } }, on, sleep, late, block);
-        compare ("a synced LFO, stopped", { { ParamId::lfoSync, 8 } }, stopped, sleep, late, block, false);
+        CHECK (same ("a free LFO", { { ParamId::lfoRate, 0.5f } }, stopped, sleep, late, block, true));
+        CHECK (same ("a synced LFO, playing", { { ParamId::lfoSync, 8 } }, on, sleep, late, block, true));
+        CHECK (same ("a synced LFO, stopped", { { ParamId::lfoSync, 8 } }, stopped, sleep, late, block, true, lfoNear));
+    }
+    auto at = [] (double frames) { return (uint64_t) (frames / 128) * 128; };
+    const std::vector<std::pair<uint32_t, float>> inc32 = { { ParamId::sequence, 10 }, { ParamId::incClock, 13 }, { ParamId::decClock, 0 },
+                                                            { ParamId::resetClock, 0 } };
+    const std::vector<std::pair<uint32_t, float>> inc8 = { { ParamId::sequence, 10 }, { ParamId::incClock, 9 }, { ParamId::decClock, 0 },
+                                                           { ParamId::resetClock, 0 } };
+    // A host whose place runs 0.3 % slow of its tempo: 64 rests of about 10 beats.
+    {
+        int off = 0;
+        const SongFn slow = [&] (uint64_t f) { return song (true, 0.997 * (double) f / beat); };
+        for (int k = 0; k < 64; ++k)
+            off += same (nullptr, inc32, slow, at (2.3 * beat), at ((12.0 + k * 0.0137) * beat), 128, true, lfoUnchecked) ? 0 : 1;
+        if (off != 0)
+            std::printf ("  slept, the place 0.3 %% slow: %d of 64 wakes off\n", off);
+        CHECK (off == 0);
+    }
+    // 0.3 % fast, an 8-beat loop with a 1-bar Reset: 40 wakes as the loop goes round, told in the block after.
+    {
+        int off = 0;
+        const std::vector<std::pair<uint32_t, float>> reset = { { ParamId::sequence, 10 }, { ParamId::incClock, 9 }, { ParamId::decClock, 0 },
+                                                                { ParamId::resetClock, 1 } };
+        for (int k = 0; k < 40; ++k)
+        {
+            const double start = 0.37 + 0.011 * k;
+            const SongFn fast = [&] (uint64_t f) { return looped (song (true, std::fmod (start + 1.003 * (double) f / beat, 8.0)), 0.0, 8.0); };
+            uint64_t turn = 128;
+            while (fast (turn).beats >= fast (turn - 128).beats)
+                turn += 128;
+            off += same (nullptr, reset, fast, at (2.3 * beat), turn, 128, true, lfoUnchecked) ? 0 : 1;
+        }
+        if (off != 0)
+            std::printf ("  slept, the place 0.3 %% fast round a loop: %d of 40 wakes off\n", off);
+        CHECK (off == 0);
+    }
+    // A locate back by 1.5 beats after a 200 s rest (and by 3).
+    {
+        const uint64_t wake = at (402.3 * beat);
+        for (double back : { 1.5, 3.0 })
+        {
+            const SongFn located = [&] (uint64_t f) {
+                return f < wake ? song (true, (double) f / beat) : song (true, (double) wake / beat - back + (double) (f - wake) / beat);
+            };
+            CHECK (same ("a locate back after a 200 s rest", inc8, located, at (2.3 * beat), wake, 128, true, lfoUnchecked));
+        }
+    }
+    // The tempo from 120 to 160 bpm at beat 4, to 125 at beat 44, then a Stop at 30 s.
+    {
+        auto beatsAt = [] (uint64_t f) {
+            const double t = (double) f / 48000.0, t1 = 2.0, t2 = t1 + 40.0 / (160.0 / 60.0);
+            if (t < t1) return std::make_pair (t * 2.0, 120.0);
+            if (t < t2) return std::make_pair (4.0 + (t - t1) * 160.0 / 60.0, 160.0);
+            return std::make_pair (44.0 + (t - t2) * 125.0 / 60.0, 125.0);
+        };
+        const uint64_t stop = at (30.0 * 48000.0);
+        const SongFn swept = [&] (uint64_t f) {
+            const auto [b, bpm] = beatsAt (std::min (f, stop));
+            return song (f < stop, b, bpm);
+        };
+        CHECK (same ("the tempo changed twice, then a Stop", inc8, swept, at (1.0 * 48000.0), stop, 128, true, lfoUnchecked));
+    }
+    // Not gated: 60 s with the song stopped at beat 12, 1 s in; then the 8-beat loop going round seven times.
+    {
+        const uint64_t stop = at (12.0 * beat);
+        const SongFn stops = [&] (uint64_t f) { return f < stop ? song (true, (double) f / beat) : song (false, (double) stop / beat); };
+        CHECK (same ("not gated, a Stop 1 s into 60 s", inc8, stops, at (10.0 * beat), at (130.0 * beat), 128, false, lfoUnchecked));
+        const SongFn laps = [&] (uint64_t f) { return looped (song (true, std::fmod ((double) f / beat, 8.0)), 0.0, 8.0); };
+        Engine a, b;
+        made (a, inc8), made (b, inc8);
+        const uint64_t sleep = at (3.0 * beat), wake = at (61.3 * beat);
+        play (a, 0, sleep, laps, 128);
+        play (b, 0, sleep, laps, 128);
+        const uint32_t before = b.triggerCount();
+        b.slept (wake - sleep, laps (wake), 128, false);
+        CHECK (b.triggerCount() == before); // nothing bears the seven turns out: none counted
     }
     {
         Engine e;
         made (e, clocks);
         play (e, 0, 128 * 100, [&] (uint64_t f) { return song (true, (double) f / beat); }, 128);
-        e.slept (~0ull, song (true, 1e15)); // a hostile host: the longest sleep counted, a place past any song's
+        e.slept (~0ull, song (true, 1e15), 128, true); // a hostile host: the longest sleep counted, a place past any song's
+        e.slept (~0ull, song (false, 1e15), 128, true);
         play (e, 128 * 100, 128 * 200, [&] (uint64_t f) { return song (true, (double) f / beat); }, 128);
         CHECK (std::isfinite (e.lfoPlace()) && e.sequencer().pos >= 0 && e.sequencer().pos < 11);
+    }
+}
+
+// The review's two old findings, each against its failure. A host's place jittered by up to 0.002 beat a block about
+// its line (a swung tick, MTC's trim): Inc 1/32 over 100 beats fires each of the 800 boundaries once (a step back under
+// a 64th note had fired one twice). Env Trigger with Trig Level at its floor (-48 dB): silence never fires it (it had,
+// every second control step); a burst still does, once.
+void testClockJitterAndTriggerFloor()
+{
+    constexpr double beat = 24000.0;
+    std::vector<float> zero (128, 0.0f), l (128), r (128), loud (128, 0.5f);
+    {
+        Engine e;
+        e.prepare (48000.0, 128);
+        program (e.bank(), 10, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 });
+        e.set (ParamId::sequence, 10), e.set (ParamId::incClock, 13);
+        e.reset();
+        std::mt19937 rng (7);
+        std::uniform_real_distribution<double> jitter (-0.002, 0.002);
+        const uint64_t end = (uint64_t) (100.06 * beat) / 128 * 128; // no boundary within the jitter of the last steps
+        for (uint64_t at = 0; at < end; at += 128)
+        {
+            e.transport (true, true, (double) at / beat + (at > 0 ? jitter (rng) : 0.0), 120.0);
+            e.render (zero.data(), zero.data(), l.data(), r.data(), 128);
+        }
+        if (e.triggerCount() != 800)
+            std::printf ("  the place jittered: %u triggers for 800 boundaries\n", e.triggerCount());
+        CHECK (e.triggerCount() == 800);
+    }
+    {
+        Engine e;
+        e.prepare (48000.0, 128);
+        program (e.bank(), 10, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 });
+        e.set (ParamId::sequence, 10), e.set (ParamId::incClock, 0), e.set (ParamId::envTrigger, 1), e.set (ParamId::trigLevel, -48.0f);
+        e.reset();
+        for (int b = 0; b < 48000 * 11 / 128; ++b)
+        {
+            e.transport (false, true, 0.0, 120.0);
+            e.render (zero.data(), zero.data(), l.data(), r.data(), 128);
+        }
+        CHECK (e.triggerCount() == 0);
+        for (int b = 0; b < 40; ++b)
+            e.render (loud.data(), loud.data(), l.data(), r.data(), 128);
+        CHECK (e.triggerCount() == 1);
     }
 }
 
@@ -1487,6 +1620,7 @@ int main()
     testSequencerEngine();
     testClockGaps();
     testSlept();
+    testClockJitterAndTriggerFloor();
     testFilterSettings();
     testTextEdges();
     testVerifiedFixes();

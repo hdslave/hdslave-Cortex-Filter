@@ -42,6 +42,7 @@ struct Plugin
     Engine engine;
     bool active = false;
     int64_t steadyNext = -1; // the steady_time a call after the last one has if the host ran every frame (-1: unknown)
+    uint64_t quietFrames = 0; // frames its input and output have been under the host's -100 dB, to the last call's end
     const clap_host_params* hostParams = nullptr;
     // Melodee's screen (melodee_screen.h): the page, what the audio thread tells it, the values it changed (told to
     // the host from the next process or flush, a bit a row) and whether an input asked for a paint now.
@@ -514,7 +515,7 @@ bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t 
     for (uint32_t i = 0; i < paramCount; ++i) // values the host set while inactive: in place before the glides settle
         p.applied[i] = p.values[i].load (std::memory_order_relaxed), p.engine.set (paramTable[i].id, p.applied[i]);
     p.engine.prepare (rate, maxFrames);
-    p.steadyNext = -1; // a new run: no sleep to count before its first block
+    p.steadyNext = -1, p.quietFrames = 0; // a new run: no sleep to count before its first block
     p.commands.keepFor ((float) rate);
     p.feed.rate.store ((float) rate, std::memory_order_relaxed);
     p.active = true;
@@ -536,7 +537,7 @@ void pluginReset (const clap_plugin* plugin)
     auto& p = of (plugin);
     p.commands.clear();
     p.engine.reset();
-    p.steadyNext = -1;
+    p.steadyNext = -1, p.quietFrames = 0;
 }
 
 // Denormals: flush them to zero for the block (the filters ring down into them), as the FPU had it after.
@@ -570,6 +571,31 @@ Engine::SongNow songOf (const clap_event_transport* t)
     return s;
 }
 
+// hdslaveOS's idle gate (src/melodee/plugin/idle_gate.h): an effect sleeps once its input and output have been under
+// -100 dB for half a second or the tail it reports, at most 10 s; this one's tail makes it 10 s. Sound over that
+// level resets the count.
+constexpr float hostQuietLevel = 1e-5f;
+constexpr double hostGateSeconds = std::max (0.5, std::min ((double) tailSeconds, 10.0));
+// Whether any of `n` samples is over that level (in chunks, so a sounding block is told by its first).
+bool overQuiet (const float* x, uint32_t n)
+{
+    if (x == nullptr)
+        return false;
+    uint32_t i = 0;
+    for (; i + 16 <= n; i += 16)
+    {
+        bool over = false;
+        for (uint32_t k = 0; k < 16; ++k)
+            over |= std::fabs (x[i + k]) > hostQuietLevel;
+        if (over)
+            return true;
+    }
+    for (; i < n; ++i)
+        if (std::fabs (x[i]) > hostQuietLevel)
+            return true;
+    return false;
+}
+
 clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process* process)
 {
     auto& p = of (plugin);
@@ -590,15 +616,24 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         inR = process->audio_inputs[0].channel_count > 1 ? process->audio_inputs[0].data32[1] : nullptr;
     }
 
-    // Frames the host let it sleep through since its last call: CLAP's steady_time counts on by more than the last
-    // call's frames (hdslaveOS from 0.8.3-hdslave.4 counts the frames it skips). The sound moves on by them first, as
-    // it would have run every block, before this block's values, events and transport (Engine::slept). A host whose
-    // steady_time stands still while asleep, or that has none (-1), tells no sleep.
+    // Frames the host did not run it for since its last call: CLAP's steady_time counts on by more than the last
+    // call's frames (hdslaveOS from 0.8.3-hdslave.4 counts every block it does not run it in: asleep, its slot
+    // bypassed, its track frozen or empty). The sound moves on by them first, as it would have run every block, before
+    // this block's values, events and transport (Engine::slept). They can only have been the idle gate's sleep, with
+    // its block for every transport change, if the input and output had been quiet for as long as the gate waits. A
+    // host whose steady_time stands still while asleep, or that has none (-1), tells no frames.
     const Engine::SongNow song = songOf (process->transport);
     const int64_t steady = process->steady_time;
     if (steady >= 0 && p.steadyNext >= 0 && steady > p.steadyNext)
-        p.engine.slept ((uint64_t) (steady - p.steadyNext), song);
+    {
+        const uint64_t gap = (uint64_t) (steady - p.steadyNext);
+        const bool gated = (double) p.quietFrames >= hostGateSeconds * (double) p.engine.sampleRate() - 0.5;
+        p.engine.slept (gap, song, frames, gated);
+        p.quietFrames = gated ? std::min<uint64_t> (p.quietFrames + gap, UINT64_MAX / 2) : 0; // slept: quiet throughout
+    }
     p.steadyNext = steady >= 0 && steady <= INT64_MAX - (int64_t) frames ? steady + (int64_t) frames : -1;
+    // This block's input, before the sound (the output may be the input's buffers): counted when steady_time is.
+    const bool loudIn = steady >= 0 && (overQuiet (inL, frames) || overQuiet (inR, frames));
 
     // Values the main thread changed (a state loaded while playing, the page): looked through only when it wrote some.
     if (p.mainChanged.exchange (false, std::memory_order_acquire))
@@ -664,6 +699,8 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     for (; next < count; ++next) // events stamped past the block (a host's mistake): applied at its end
         handle (p, in->get (in, next));
     tellHost (p, process->out_events, 0);
+    if (steady >= 0) // how long the input and output have been quiet, as the host's idle gate counts it
+        p.quietFrames = loudIn || overQuiet (left, frames) || overQuiet (right, frames) ? 0 : std::min<uint64_t> (p.quietFrames + frames, UINT64_MAX / 2);
 
     // The page: where the filter is now; a paint asked for about 40 times a second (the page paces its frames).
     const Position l = p.engine.left(), r = p.engine.right();

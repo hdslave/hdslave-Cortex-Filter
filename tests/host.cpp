@@ -775,20 +775,21 @@ void testSequencerGaps()
 
 // hdslaveOS's idle gate for an effect (src/melodee/plugin/idle_gate.h, as plugin_rack.cpp and clap_instance.cpp run
 // it): before each block the plug-in is skipped once its input and output have been under -100 dB for half a second,
-// unless the block's input is louder or the plug-in asked to be run (request_process: the host clears the wish as a
-// block starts, so one asked for during a block runs the next). Skipped, it is not called at all: it hears no
-// transport and gives silence. The song moves on regardless. (hdslaveOS waits for an effect's reported tail when that
-// is longer, at most 10 s, which for this one is 10 s; the model keeps the gate's half second, so the rests here are
-// short.) What woke it counts it quiet again from that block. hdslaveOS from 0.8.3-hdslave.4, as the model has it
-// unless told otherwise:
+// or for the tail it reports when that is longer, at most 10 s (this one's 11 s tail: 10 s), unless the block's input
+// is louder or the plug-in asked to be run (request_process: the host clears the wish as a block starts, so one asked
+// for during a block runs the next). Skipped, it is not called at all: it hears no transport and gives silence. The
+// song moves on regardless. What woke it counts it quiet again from that block. hdslaveOS from 0.8.3-hdslave.4, as the
+// model has it unless told otherwise:
 // - `transportWakes`: a sleeping plug-in is also run for the one block in which the transport starts, stops or jumps
 //   (a locate, the loop going round), its place off by more than a 64th note from where the block before led;
-// - `countsSleep`: steady_time counts the frames it slept (in every build before, it stood still asleep);
+// - `countsSleep`: steady_time counts the frames it slept, and those of `bypassed` blocks (a bypassed slot, a frozen
+//   track: not run at all, nor woken, their input passed by); in every build before, it stood still;
 // - the song's loop, on Song with its loop braced, told while it plays (CLAP_TRANSPORT_IS_LOOP_ACTIVE).
 struct GatedHost
 {
     clap_host host;
     bool asked = false, transportWakes = true, countsSleep = true;
+    std::function<bool (uint64_t)> bypassed; // the blocks (by their first frame) the plug-in is bypassed for
     GatedHost()
         : host { CLAP_VERSION, this, "Cortex Filter gated test host", "tests", "", "1", hostExtension, [] (const clap_host*) {},
                  [] (const clap_host* h) { static_cast<GatedHost*> (h->host_data)->asked = true; }, [] (const clap_host*) {} }
@@ -808,7 +809,9 @@ Stereo hosted (Instance& a, const Stereo& in, const std::function<SongAt (uint64
 {
     const size_t frames = in.l.size();
     Stereo o { std::vector<float> (frames, 0.0f), std::vector<float> (frames, 0.0f) };
-    const uint32_t needed = (uint32_t) std::lround (0.5 * a.rate);
+    const auto* tail = static_cast<const clap_plugin_tail*> (a.plugin->get_extension (a.plugin, CLAP_EXT_TAIL));
+    const double span = std::max (0.5, std::min (tail != nullptr ? (double) tail->get (a.plugin) / a.rate : 0.0, 10.0)); // IdleGate::set_tail
+    const uint32_t needed = (uint32_t) std::lround (span * a.rate);
     uint32_t quiet = 0;
     uint64_t steady = 0;
     auto loud = [] (const float* l, const float* r, size_t n) {
@@ -829,6 +832,13 @@ Stereo hosted (Instance& a, const Stereo& in, const std::function<SongAt (uint64
         const double expected = before.playing ? before.beats + 128.0 * before.bpm / 60.0 / a.rate : before.beats;
         const bool changed = at > 0 && (now.playing != before.playing || (now.playing && std::fabs (now.beats - expected) > 1.0 / 16.0));
         before = now;
+        if (gate != nullptr && gate->bypassed && gate->bypassed (at))
+        {
+            std::copy (ins[0], ins[0] + n, outs[0]), std::copy (ins[1], ins[1] + n, outs[1]);
+            if (gate->countsSleep)
+                steady += n;
+            continue;
+        }
         if (gate != nullptr)
         {
             const bool waking = gate->asked || loud (ins[0], ins[1], n) || (changed && gate->transportWakes);
@@ -887,23 +897,28 @@ Stereo bursts (size_t frames, size_t every, float level)
     return s;
 }
 
-// The effect as hdslaveOS runs it, sleeping through silence, against the same effect run every block.
+// The effect as hdslaveOS runs it, sleeping through silence, against the same effect run every block. It sleeps once
+// it has been quiet for the gate's 10 s, so the rests here are 14 s long (2 s to 16 s), asleep from about 12 s, and
+// what happens in them happens from 13.5 s.
 // - A sequence lets it sleep through a rest: woken by the sound coming back, or for a block by a transport change, it
 //   moves on by the frames it slept (steady_time) to where the song had got to, counting the clocks the song passed,
 //   then hears the block's own transport; so a second after the sound is back it is where it would have been awake
 //   (within 1e-3, as testSequencerGaps: the fades between filters differ until then). In a rest: a Stop and a Play
-//   from the top, a Play, the tempo changed, a locate forward, a 2-bar loop going round onto its Reset; and with Reset
-//   Clock Off (nothing lining the sequence up again), the song playing on, the loop going round, a locate back and a
-//   Stop, and the loop going round or a Stop after the tempo changed (the loop's ends and the place a Stop holds
-//   telling where the song had got to).
+//   from the top, a Play, the tempo changed, a locate forward, a loop going round onto its Reset; and with Reset Clock
+//   Off (nothing lining the sequence up again), the song playing on, the loop going round, a locate back and a Stop,
+//   and the loop going round or a Stop after the tempo changed (the loop's ends and the place a Stop holds telling
+//   where the song had got to).
+// - Bypassed (no block for the transport, steady_time counting on; the bypass begun while it sounds, so not a sleep):
+//   the song playing on, and a Stop in the bypass with the bypass ended stopped, land; a locate back in it is not
+//   counted (nothing bears it out), and the sequence is behind, as 0.3.3 would be.
 // - The host as it was (no block for the transport, steady_time standing still asleep): a Stop and a Play in a rest
 //   are missed and the sequence is off. With steady_time standing still but the block for the transport, the sound
 //   is 0.3.3's: with Reset Clock Off, a loop going round, a locate back or a Stop in a rest leave the sequence behind.
-// - The one limit left, held here so a change to it shows: the tempo changed and then a locate back, in one rest:
-//   the clocks are counted at the tempo it fell asleep at (nothing tells when the tempo changed).
+// - The one limit left in a sleep, held here so a change to it shows: the tempo changed and then a locate back, in one
+//   rest: the clocks are counted at the tempo it fell asleep at (nothing tells when the tempo changed).
 // - The LFO runs on through a rest: free, and synced with the song stopped (where it runs on at the tempo).
-// - The envelope follower keeps it awake while it falls and something reads it: Env Trigger re-arms through a rest
-//   (each of six hits steps the sequence, not only the first) and Env > Morph starts each hit from where the follower
+// - The envelope follower keeps it awake while it falls and something reads it: Env Trigger re-arms through rests
+//   (each of four hits steps the sequence, not only the first) and Env > Morph starts each hit from where the follower
 //   fell to, to the bit; once the follower is under -100 dB it sleeps again.
 // - With neither in use (a plain filter) it sleeps as before.
 void testIdleGate()
@@ -919,10 +934,10 @@ void testIdleGate()
     // they differ by more than `allowed`, or always with CORTEX_DEBUG set).
     auto compare = [&] (const char* what, const std::function<void (Instance&)>& patch, const Stereo& in,
                         const std::function<SongAt (uint64_t)>& song, int& skipped, size_t from = 0, float allowed = 0.0f,
-                        bool transportWakes = true, bool countsSleep = true) {
+                        bool transportWakes = true, bool countsSleep = true, const std::function<bool (uint64_t)>& bypassed = {}) {
         Instance through;
         GatedHost gate;
-        gate.transportWakes = transportWakes, gate.countsSleep = countsSleep;
+        gate.transportWakes = transportWakes, gate.countsSleep = countsSleep, gate.bypassed = bypassed;
         Instance gated (rate, 4096, &gate.host);
         patch (through), patch (gated);
         const Stereo a = hosted (through, in, song, nullptr), b = hosted (gated, in, song, &gate, &skipped);
@@ -932,101 +947,116 @@ void testIdleGate()
         return apart;
     };
     auto beatsFrom = [&] (double beats, size_t since, uint64_t at, double bpm = 120.0) { return beats + (double) (at - since) * bpm / 60.0 / rate; };
+    auto s = [&] (double seconds) { return (uint64_t) (seconds * (double) second); };
 
-    // Vowel Walk (a sequence on 1/8 clocks, reset every 2 bars) on a phrase with a rest from 2 s to 6 s, compared from
-    // 7 s.
-    const Stereo phrase = silenceFrom (loop (rate, 10.0), 2 * second, 6 * second);
+    // Vowel Walk (a sequence on 1/8 clocks, reset every 2 bars) on a phrase with a rest from 2 s to 16 s, compared from
+    // 17 s.
+    const Stereo phrase = silenceFrom (loop (rate, 20.0), 2 * second, 16 * second);
+    const size_t after = 17 * second;
     auto vowelWalk = [] (Instance& a) { CHECK (a.loadPreset ("vowel-walk")); };
     auto stopPlay = [&] (uint64_t at) -> SongAt {
-        if (at < 7 * second / 2) return { true, beatsFrom (0.0, 0, at) }; // from the top: beat 7 at 3.5 s
-        if (at < 9 * second / 2) return { false, 7.0 };                  // stopped a second
-        return { true, beatsFrom (0.0, 9 * second / 2, at) };           // Play from the top again
+        if (at < s (14.0)) return { true, beatsFrom (0.0, 0, at) }; // from the top: beat 28 at 14 s
+        if (at < s (15.0)) return { false, 28.0 };                   // stopped a second
+        return { true, beatsFrom (0.0, s (15.0), at) };             // Play from the top again
     };
     {
         int skipped = 0;
-        CHECK (compare ("a Stop and a Play from the top in a rest", vowelWalk, phrase, stopPlay, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("a Stop and a Play from the top in a rest", vowelWalk, phrase, stopPlay, skipped, after, 1e-3f) < 1e-3f);
         CHECK (skipped > 0);
         skipped = 0; // the host as it was: no block for the transport, steady_time standing still asleep
-        CHECK (compare ("the same without the host's wake", vowelWalk, phrase, stopPlay, skipped, 7 * second, 1.0f, false, false) > 1e-2f);
+        CHECK (compare ("the same without the host's wake", vowelWalk, phrase, stopPlay, skipped, after, 1.0f, false, false) > 1e-2f);
     }
     {
         int skipped = 0;
-        const Stereo in = silenceFrom (loop (rate, 9.0), second, 5 * second);
+        const Stereo in = silenceFrom (loop (rate, 19.0), second, 15 * second);
         auto song = [&] (uint64_t at) -> SongAt {
-            if (at < 2 * second) return { false, 0.0 };           // stopped at the top, the phrase heard
-            return { true, beatsFrom (0.0, 2 * second, at) };     // Play at 2 s, in the rest
+            if (at < s (13.0)) return { false, 0.0 };       // stopped at the top, the phrase heard
+            return { true, beatsFrom (0.0, s (13.0), at) }; // Play at 13 s, in the rest
         };
-        CHECK (compare ("a Play in a rest", vowelWalk, in, song, skipped, 6 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("a Play in a rest", vowelWalk, in, song, skipped, 16 * second, 1e-3f) < 1e-3f);
         CHECK (skipped > 0);
     }
     {
         int skipped = 0;
         auto song = [&] (uint64_t at) -> SongAt {
-            if (at < 3 * second) return { true, beatsFrom (0.0, 0, at) };
-            return { true, beatsFrom (6.0, 3 * second, at, 90.0), 90.0 }; // 90 bpm from 3 s (beat 6), no jump
+            if (at < s (13.5)) return { true, beatsFrom (0.0, 0, at) };
+            return { true, beatsFrom (27.0, s (13.5), at, 90.0), 90.0 }; // 90 bpm from 13.5 s (beat 27), no jump
         };
-        CHECK (compare ("the tempo changed in a rest", vowelWalk, phrase, song, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("the tempo changed in a rest", vowelWalk, phrase, song, skipped, after, 1e-3f) < 1e-3f);
         CHECK (skipped > 0);
     }
     {
         int skipped = 0;
         auto song = [&] (uint64_t at) -> SongAt {
-            if (at < 7 * second / 2) return { true, beatsFrom (0.0, 0, at) };
-            return { true, beatsFrom (20.0, 7 * second / 2, at) }; // a locate to beat 20 at 3.5 s
+            if (at < s (14.5)) return { true, beatsFrom (0.0, 0, at) };
+            return { true, beatsFrom (40.0, s (14.5), at) }; // a locate to beat 40 at 14.5 s
         };
-        CHECK (compare ("a locate forward in a rest", vowelWalk, phrase, song, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("a locate forward in a rest", vowelWalk, phrase, song, skipped, after, 1e-3f) < 1e-3f);
         CHECK (skipped > 0);
     }
+    // A loop of the song's first 30 beats, round at 15 s (onto beat 0: a Reset).
+    auto loopRound = [&] (uint64_t at) -> SongAt { return { true, std::fmod (beatsFrom (0.0, 0, at), 30.0), 120.0, true, 0.0, 30.0 }; };
     {
         int skipped = 0;
-        auto song = [&] (uint64_t at) -> SongAt { return { true, std::fmod (beatsFrom (0.0, 0, at), 8.0), 120.0, true, 0.0, 8.0 }; }; // round at 4 s
-        CHECK (compare ("a loop round onto its Reset in a rest", vowelWalk, phrase, song, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("a loop round onto its Reset in a rest", vowelWalk, phrase, loopRound, skipped, after, 1e-3f) < 1e-3f);
         CHECK (skipped > 0);
     }
     // Reset Clock Off, so only the Inc clocks place the sequence: the song playing on through the rest (patterns: the
-    // place counts up), the 2-bar loop going round at 4 s, a locate back to beat 1 at 3.5 s, and a Stop at 3.5 s (the
-    // sound coming back stopped). Then the tempo to 90 bpm at 3 s (beat 6), and after it the loop going round (at
-    // 4.33 s) or a Stop (at 4 s, beat 7.5); and with no loop told, the same turn is a locate back after a tempo change.
+    // place counts up), the loop going round at 15 s, a locate back to beat 1 at 14.5 s, and a Stop at 14.5 s (the sound
+    // coming back stopped). Then the tempo to 90 bpm at 13.5 s (beat 27), and after it the loop going round (at 15.5 s)
+    // or a Stop (at 15 s, beat 29.25); and with no loop told, the same turn is a locate back after a tempo change.
+    auto noReset = [&] (Instance& a) { vowelWalk (a), a.setup ({ { "Reset Clock", 0 } }, 0.01); };
+    auto playOn = [&] (uint64_t at) -> SongAt { return { true, beatsFrom (0.0, 0, at) }; };
     {
-        auto noReset = [&] (Instance& a) { vowelWalk (a), a.setup ({ { "Reset Clock", 0 } }, 0.01); };
-        auto playOn = [&] (uint64_t at) -> SongAt { return { true, beatsFrom (0.0, 0, at) }; };
-        auto loopRound = [&] (uint64_t at) -> SongAt { return { true, std::fmod (beatsFrom (0.0, 0, at), 8.0), 120.0, true, 0.0, 8.0 }; };
         auto locateBack = [&] (uint64_t at) -> SongAt {
-            if (at < 7 * second / 2) return { true, beatsFrom (0.0, 0, at) };
-            return { true, beatsFrom (1.0, 7 * second / 2, at) };
+            if (at < s (14.5)) return { true, beatsFrom (0.0, 0, at) };
+            return { true, beatsFrom (1.0, s (14.5), at) };
         };
         auto stopIn = [&] (uint64_t at) -> SongAt {
-            if (at < 7 * second / 2) return { true, beatsFrom (0.0, 0, at) };
-            return { false, 7.0 };
+            if (at < s (14.5)) return { true, beatsFrom (0.0, 0, at) };
+            return { false, 29.0 };
         };
         auto slower = [&] (uint64_t at, bool told) -> SongAt {
-            if (at < 3 * second) return { true, beatsFrom (0.0, 0, at), 120.0, told, 0.0, 8.0 };
-            return { true, std::fmod (beatsFrom (6.0, 3 * second, at, 90.0), 8.0), 90.0, told, 0.0, 8.0 }; // round at 4.33 s
+            if (at < s (13.5)) return { true, beatsFrom (0.0, 0, at), 120.0, told, 0.0, 30.0 };
+            return { true, std::fmod (beatsFrom (27.0, s (13.5), at, 90.0), 30.0), 90.0, told, 0.0, 30.0 }; // round at 15.5 s
         };
         auto slowerStop = [&] (uint64_t at) -> SongAt {
-            if (at < 3 * second) return { true, beatsFrom (0.0, 0, at) };
-            if (at < 4 * second) return { true, beatsFrom (6.0, 3 * second, at, 90.0), 90.0 };
-            return { false, 7.5, 90.0 };
+            if (at < s (13.5)) return { true, beatsFrom (0.0, 0, at) };
+            if (at < s (15.0)) return { true, beatsFrom (27.0, s (13.5), at, 90.0), 90.0 };
+            return { false, 29.25, 90.0 };
         };
         int skipped = 0;
-        CHECK (compare ("the song playing on in a rest, Reset Clock Off", noReset, phrase, playOn, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("the song playing on in a rest, Reset Clock Off", noReset, phrase, playOn, skipped, after, 1e-3f) < 1e-3f);
         CHECK (skipped > 0);
-        CHECK (compare ("a loop round in a rest, Reset Clock Off", noReset, phrase, loopRound, skipped, 7 * second, 1e-3f) < 1e-3f);
-        CHECK (compare ("a locate back in a rest, Reset Clock Off", noReset, phrase, locateBack, skipped, 7 * second, 1e-3f) < 1e-3f);
-        CHECK (compare ("a Stop in a rest, Reset Clock Off", noReset, phrase, stopIn, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("a loop round in a rest, Reset Clock Off", noReset, phrase, loopRound, skipped, after, 1e-3f) < 1e-3f);
+        CHECK (compare ("a locate back in a rest, Reset Clock Off", noReset, phrase, locateBack, skipped, after, 1e-3f) < 1e-3f);
+        CHECK (compare ("a Stop in a rest, Reset Clock Off", noReset, phrase, stopIn, skipped, after, 1e-3f) < 1e-3f);
         CHECK (compare ("the tempo changed, then the loop round, Reset Clock Off", noReset, phrase,
-                        [&] (uint64_t at) { return slower (at, true); }, skipped, 7 * second, 1e-3f) < 1e-3f);
-        CHECK (compare ("the tempo changed, then a Stop, Reset Clock Off", noReset, phrase, slowerStop, skipped, 7 * second, 1e-3f) < 1e-3f);
+                        [&] (uint64_t at) { return slower (at, true); }, skipped, after, 1e-3f) < 1e-3f);
+        CHECK (compare ("the tempo changed, then a Stop, Reset Clock Off", noReset, phrase, slowerStop, skipped, after, 1e-3f) < 1e-3f);
         // The limit left: the same turn with no loop told is a locate back after a tempo change.
         CHECK (compare ("the tempo changed, then a locate back (the limit)", noReset, phrase,
-                        [&] (uint64_t at) { return slower (at, false); }, skipped, 7 * second, 1.0f) > 1e-2f);
+                        [&] (uint64_t at) { return slower (at, false); }, skipped, after, 1.0f) > 1e-2f);
         // A host whose steady_time stands still asleep (but runs the block for the transport): 0.3.3's sound, the
         // sequence behind after a loop round, a locate back or a Stop, as it was; the song playing on still lands.
         const bool still = false;
-        CHECK (compare ("the song playing on, steady_time still", noReset, phrase, playOn, skipped, 7 * second, 1e-3f, true, still) < 1e-3f);
-        CHECK (compare ("a loop round, steady_time still (0.3.3)", noReset, phrase, loopRound, skipped, 7 * second, 1.0f, true, still) > 1e-2f);
-        CHECK (compare ("a locate back, steady_time still (0.3.3)", noReset, phrase, locateBack, skipped, 7 * second, 1.0f, true, still) > 1e-2f);
-        CHECK (compare ("a Stop, steady_time still (0.3.3)", noReset, phrase, stopIn, skipped, 7 * second, 1.0f, true, still) > 1e-2f);
+        CHECK (compare ("the song playing on, steady_time still", noReset, phrase, playOn, skipped, after, 1e-3f, true, still) < 1e-3f);
+        CHECK (compare ("a loop round, steady_time still (0.3.3)", noReset, phrase, loopRound, skipped, after, 1.0f, true, still) > 1e-2f);
+        CHECK (compare ("a locate back, steady_time still (0.3.3)", noReset, phrase, locateBack, skipped, after, 1.0f, true, still) > 1e-2f);
+        CHECK (compare ("a Stop, steady_time still (0.3.3)", noReset, phrase, stopIn, skipped, after, 1.0f, true, still) > 1e-2f);
+    }
+    // Bypassed from 1 s to 8 s, begun while the phrase sounds: the song playing on; a Stop at 3 s (beat 6), the bypass
+    // ended stopped; a locate back to beat 1 at 3 s (not counted: the limit, held so a change shows).
+    {
+        auto bypass = [&] (uint64_t at) { return at >= s (1.0) && at < s (8.0); };
+        auto stopAt3 = [&] (uint64_t at) -> SongAt { return at < s (3.0) ? SongAt { true, beatsFrom (0.0, 0, at) } : SongAt { false, 6.0 }; };
+        auto backAt3 = [&] (uint64_t at) -> SongAt {
+            return at < s (3.0) ? SongAt { true, beatsFrom (0.0, 0, at) } : SongAt { true, beatsFrom (1.0, s (3.0), at) };
+        };
+        int skipped = 0;
+        CHECK (compare ("bypassed, the song playing on", noReset, phrase, playOn, skipped, after, 1e-3f, true, true, bypass) < 1e-3f);
+        CHECK (compare ("bypassed, a Stop in it", noReset, phrase, stopAt3, skipped, after, 1e-3f, true, true, bypass) < 1e-3f);
+        CHECK (compare ("bypassed, a locate back in it (the limit)", noReset, phrase, backAt3, skipped, after, 1.0f, true, true, bypass) > 1e-2f);
     }
     // The LFO through the same rest, the song stopped: free (0.63 Hz) on Freq, and synced to 1/4T, which runs on at the
     // tempo while the song is stopped.
@@ -1035,15 +1065,16 @@ void testIdleGate()
         auto freeLfo = [] (Instance& a) { a.setup ({ { "Filter", 2 }, { "LFO Rate", 0.5 }, { "LFO > Freq", 1.0 } }, 0.01); };
         auto synced = [] (Instance& a) { a.setup ({ { "Filter", 2 }, { "LFO Sync", 8 }, { "LFO > Freq", 1.0 } }, 0.01); };
         int skipped = 0;
-        CHECK (compare ("a free LFO through a rest", freeLfo, phrase, stoppedAt, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("a free LFO through a rest", freeLfo, phrase, stoppedAt, skipped, after, 1e-3f) < 1e-3f);
         CHECK (skipped > 0);
         skipped = 0;
-        CHECK (compare ("a synced LFO through a rest, stopped", synced, phrase, stoppedAt, skipped, 7 * second, 1e-3f) < 1e-3f);
+        CHECK (compare ("a synced LFO through a rest, stopped", synced, phrase, stoppedAt, skipped, after, 1e-3f) < 1e-3f);
         CHECK (skipped > 0);
     }
-    // Six hits 6 s apart, the song stopped: Env Trigger stepping the Lowpasses with the longest release (it falls
-    // 6 dB under Trig Level about 4.6 s after a hit), and Env > Morph alone, no sequence.
-    const Stereo hits = bursts (36 * second, 6 * second, 0.5f);
+    // Four hits 16 s apart, the song stopped: Env Trigger stepping the Lowpasses with the longest release (it falls
+    // 6 dB under Trig Level about 4.6 s after a hit, and under -100 dB about 22 s after), and Env > Morph alone, no
+    // sequence: the gate's 10 s pass in each rest with the follower still falling.
+    const Stereo hits = bursts (64 * second, 16 * second, 0.5f);
     auto stopped = [] (uint64_t) { return SongAt { false, 0.0 }; };
     {
         int skipped = 0;
@@ -1059,9 +1090,9 @@ void testIdleGate()
             a.setup ({ { "Filter", 2 }, { "Env > Morph", 1.0 }, { "Env Attack", 0.1 }, { "Env Release", 1.0 } }, 0.01);
         };
         CHECK (compare ("Env > Morph through rests", morph, hits, stopped, skipped) == 0.0f && skipped == 0);
-        // Then 40 s of silence: the follower falls under -100 dB (about 22 s at this release) and it sleeps.
+        // Then 40 s of silence: the follower falls under -100 dB (about 22 s at this release), and 10 s later it sleeps.
         Stereo tail = hits;
-        tail.l.resize (76 * second, 0.0f), tail.r.resize (76 * second, 0.0f);
+        tail.l.resize (104 * second, 0.0f), tail.r.resize (104 * second, 0.0f);
         skipped = 0;
         compare (nullptr, morph, tail, stopped, skipped);
         CHECK (skipped > 0);
