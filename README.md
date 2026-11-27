@@ -41,10 +41,20 @@ sound started the point from the stale envelope. Now, while the follower is stil
 the plug-in asks hdslaveOS to keep running it (see [Cost](#cost)). The sequence lets it sleep: it takes the song's
 place and tempo from the transport when it wakes. For a Stop or a Play in a rest it needs an hdslaveOS that runs a
 sleeping effect for the block in which the transport starts, stops or jumps (being added to hdslaveOS; earlier
-builds miss them, and the sequence then runs off the song's grid until the next Play heard). One limit remains: a loop
-going round, a locate back, or a Stop during a rest leaves the sequence behind by the Inc and Dec clocks the song
-passed while the effect slept (a Reset clock falling where a loop or locate lands lines it up at once). It lines up
-again at a Reset, a Play or a new sequence. The sound is otherwise 0.3.2's to the bit.
+builds miss them, and the sequence then runs off the song's grid until the next Play heard). The sound is otherwise
+0.3.2's to the bit.
+
+**Version 0.3.4** counts what the song passed while the effect slept. hdslaveOS from 0.8.3-hdslave.4 (not released
+yet) counts the frames a plug-in sleeps through in CLAP's `steady_time`, and tells the song's loop while Song plays
+inside its loop brace. On waking, the effect moves on by the frames it slept, as if it had run every block through the silence: the
+sequence steps by exactly the Inc, Dec and Reset clocks the song passed, and the LFO is where it would be (free, or
+synced with the song stopped). That holds for the song playing on (patterns), the loop going round, a locate back
+and a Stop during a rest, at a tempo changed in the rest too: the loop's ends and the place a Stop holds tell where
+the song had got to. In 0.3.3 a loop going round, a locate back or a Stop during a rest left the sequence behind,
+and the LFO stood still while the effect slept. One case is still off: a tempo change and then a locate back in the
+same rest (nothing tells when the tempo changed, so the clocks are counted at the tempo the effect fell asleep at).
+On a host whose `steady_time` stands still while asleep (every hdslaveOS build before 0.8.3-hdslave.4), it behaves
+as 0.3.3. The sound is otherwise 0.3.3's to the bit.
 
 ## Signal flow
 
@@ -126,7 +136,7 @@ puts back the factory's filter, or empties one of yours.
 | Control | Range | What it does |
 |---|---|---|
 | Sequence | Off, 16 sequences | The sequence that picks the filter. Loading one (or starting the song) starts it at its first step |
-| Inc Clock, Dec Clock | Off, 8 Bars … 1/32 (with triplets) | An Inc (or Dec) each time the playing song crosses that grid: on the beat, the same steps for the same part of the song. After a gap (Melodee lets the effect sleep through a rest while the song plays on) or a jump forward it catches up, in order, so the sequence is where it would be had it played through; a jump back (a loop) fires it when the song lands on the grid. A Stop or a Play in a rest is heard if Melodee runs the sleeping effect for that block (see Version 0.3.3) |
+| Inc Clock, Dec Clock | Off, 8 Bars … 1/32 (with triplets) | An Inc (or Dec) each time the playing song crosses that grid: on the beat, the same steps for the same part of the song. After a gap (Melodee lets the effect sleep through a rest while the song plays on) or a jump forward it catches up, in order, so the sequence is where it would be had it played through; a jump back (a loop) fires it when the song lands on the grid. A Stop or a Play in a rest is heard if Melodee runs the sleeping effect for that block (see Version 0.3.3), and the clocks the song passed while it slept before a loop round, a locate back or a Stop are counted if Melodee tells the frames slept (see Version 0.3.4) |
 | Reset Clock | Off, 1 – 16 bars | A Reset on that grid. Inc and Dec on the same beat come first, so a sequence reset on the bar starts the bar on its first step. It catches up after a gap as Inc and Dec do, and a loop that starts on its grid resets each time round |
 | Env Trigger | Off, Inc, Dec, Reset | The envelope follower as a trigger: each time it rises through Trig Level, that input fires; it fires again once it has fallen 6 dB under it |
 | Trig Level | −48 – 0 dB | |
@@ -303,7 +313,10 @@ set: it asks Melodee to keep running it, so the follower falls as it would while
 under −100 dB, a rest then costs what the table says (silence costs as much as sound) instead of nothing: about
 1.2 seconds after a full-scale sound at the default Env Release, about 23 seconds at the longest (at most about
 3.5 % of a core meanwhile, the worst case above). With the follower at rest or unread it sleeps as before, a
-sequence running or not.
+sequence running or not. hdslaveOS itself keeps the effect awake for the 10 seconds of its reported tail after a
+sound, so on the MPC this only adds time at the longest Env Releases (a fall over 10 seconds: Env Release above about
+0.87 s). The follower is not settled on waking instead, as the sequence and the LFO are: it falls a sample at a time
+in floats, and no closed form gives its roundings, so only running it keeps the sound to the bit.
 
 The left and right channels run side by side in one vector register, through a loop unrolled for the cube's band
 count. While the point moves, the filter is worked out again every 8 frames, with polynomial `exp2` and `tan`
@@ -343,7 +356,10 @@ tools/artifacts.sh  # what the 8-frame control steps add to a tone under a movin
   (Inc and Dec round the end, Pause, Halt, Bumper, a Bumper or Halt first, Fade, the wheel past commands, steps put in
   and taken out), its clocks on the song's grid (none at the start, Inc before Reset on the same beat, stopped and
   started again; after a gap while the song plays on, short or long, across Resets or not, where a run throughout
-  lands; a loop one Reset long resetting each time round; a jump back firing only onto the grid), the gates' rising
+  lands; a loop one Reset long resetting each time round; a jump back firing only onto the grid; and the frames a host
+  says it slept, in blocks of 128 and 100 frames, landing on the step and the trigger count of a run throughout with
+  the song playing on, its tempo changed, a Stop, a locate back and the loop going round, and the LFO on its place, to
+  the bit free and synced while playing), the gates' rising
   edges, the envelope as a trigger, the fades' times and their scaling; the filters' settings (Null giving the input
   to the bit, each side's gain, offsets and gains moving the point, Transform > Dist sounding as the plain filter at
   its bottom, distortion on one side leaving the other to the bit, bounded on loud
@@ -364,10 +380,13 @@ tools/artifacts.sh  # what the 8-frame control steps add to a tone under a movin
   finite and under 2, then ringing down to nothing; a sequence after a rest asleep sounding as with the rest played
   through, and a loop one Reset long sounding the same each pass; Melodee's idle gate modelled block by block
   (asleep after half a second under −100 dB, woken by input, by the plug-in's own request, and for one block by a
-  transport start, stop or jump): Vowel Walk sleeping through a rest with a Stop and a Play from the top in it, a
-  Play, a tempo change, a locate forward and a loop going round onto its Reset, and sounding a second after the rest
-  as with every block run (and off without the wake on the transport; off too, as the known limit, after a loop
-  going round, a locate back or a Stop in the rest, with Reset Clock Off); Env Trigger stepping a sequence through rests
+  transport start, stop or jump; `steady_time` counting the frames slept, and the song's loop told): Vowel Walk
+  sleeping through a rest with a Stop and a Play from the top in it, a Play, a tempo change, a locate forward and a
+  loop going round onto its Reset, and with Reset Clock Off the song playing on, a loop going round, a locate back, a
+  Stop, and the loop going round or a Stop after a tempo change, each sounding a second after the rest as with every
+  block run; off with the host as it was (no wake on the transport, `steady_time` still while asleep); 0.3.3's sound
+  with `steady_time` still; and off, as the one limit left, after a tempo change and then a locate back in one rest;
+  a free LFO, and one synced with the song stopped, through a rest; Env Trigger stepping a sequence through rests
   and Env > Morph's follower sounding to the bit as with every block run, the effect sleeping again once the follower
   is under −100 dB, and a plain filter sleeping as before; the page's presses dropped when stale or after a
   stop, reset or deactivation; and the page (its title moving for 4 seconds and then resting with no paints asked

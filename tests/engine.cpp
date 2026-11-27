@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <functional>
 #include <random>
 #include <vector>
 
@@ -921,6 +922,110 @@ void testClockGaps()
     }
 }
 
+// Engine::slept, as the plug-in calls it when the host's steady_time tells frames it did not run: the sound moves on
+// as one run every block through the same silence. In blocks of 128 and of 100 frames (so the sleep can end inside a
+// control step), the sequencer (Inc 1/8, Dec 1/16T, Reset Off: every clock the song passed counts) lands on the same
+// step with the same count of triggers: the song playing on, its tempo changed while it slept, a Stop held where it
+// stopped, a locate back, the loop going round (told by its ends; late inside a block; after a tempo change too). The
+// LFO lands on the same place: to the bit free and synced while the song plays, within 1e-9 of a cycle synced with
+// the song stopped (a product against a sum). An absurd sleep leaves everything finite.
+void testSlept()
+{
+    using SongFn = std::function<Engine::SongNow (uint64_t)>;
+    constexpr double beat = 24000.0; // frames, at 120 bpm and 48 kHz
+    std::vector<float> zero (4096, 0.0f), l (4096), r (4096);
+    auto play = [&] (Engine& e, uint64_t from, uint64_t to, const SongFn& song, uint32_t block) {
+        for (uint64_t at = from; at < to; at += block)
+        {
+            const Engine::SongNow s = song (at);
+            e.transport (s.playing, s.placed, s.beats, s.bpm);
+            e.render (zero.data(), zero.data(), l.data(), r.data(), (uint32_t) std::min<uint64_t> (block, to - at));
+        }
+    };
+    auto made = [] (Engine& e, const std::vector<std::pair<uint32_t, float>>& values) {
+        e.prepare (48000.0, 4096);
+        program (e.bank(), 10, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 });
+        for (const auto& [id, v] : values)
+            e.set (id, v);
+        e.reset();
+    };
+    auto song = [] (bool playing, double beats, double bpm = 120.0) {
+        Engine::SongNow s;
+        s.playing = playing, s.placed = true, s.beats = beats, s.bpm = bpm;
+        return s;
+    };
+    auto looped = [] (Engine::SongNow s, double from, double to) {
+        s.looping = true, s.loopStart = from, s.loopEnd = to;
+        return s;
+    };
+    // `a` run throughout and `b` asleep from `sleep` to `wake` (block edges), then both a block on.
+    auto compare = [&] (const char* what, const std::vector<std::pair<uint32_t, float>>& values, const SongFn& tell, uint64_t sleep,
+                        uint64_t wake, uint32_t block, bool lfoExact = true) {
+        Engine a, b;
+        made (a, values), made (b, values);
+        play (a, 0, wake, tell, block);
+        play (b, 0, sleep, tell, block);
+        b.slept (wake - sleep, tell (wake));
+        if (lfoExact)
+            CHECK (a.lfoPlace() == b.lfoPlace());
+        else
+            NEAR (a.lfoPlace(), b.lfoPlace(), 1e-9);
+        play (a, wake, wake + block, tell, block);
+        play (b, wake, wake + block, tell, block);
+        const Sequencer &x = a.sequencer(), &y = b.sequencer();
+        const bool same = x.pos == y.pos && x.mode == y.mode && x.filter == y.filter && a.triggerCount() == b.triggerCount();
+        if (! same)
+            std::printf ("  slept, %s: step %d (%u triggers) against %d (%u) run throughout\n", what, y.pos + 1, b.triggerCount(), x.pos + 1,
+                         a.triggerCount());
+        CHECK (same);
+        if (lfoExact)
+            CHECK (a.lfoPlace() == b.lfoPlace());
+    };
+    const std::vector<std::pair<uint32_t, float>> clocks = { { ParamId::sequence, 10 }, { ParamId::incClock, 9 }, { ParamId::decClock, 12 },
+                                                             { ParamId::resetClock, 0 } };
+    for (uint32_t block : { 128u, 100u })
+    {
+        auto at = [block] (double frames) { return (uint64_t) (frames / block) * block; }; // the block edge at or before
+        const uint64_t sleep = at (2.3 * beat), late = at (9.6 * beat);
+        auto on = [&] (uint64_t f) { return song (true, (double) f / beat); };
+        compare ("playing on", clocks, on, sleep, late, block);
+        const uint64_t change = at (4.1 * beat); // to 90 bpm there, unheard asleep
+        auto slower = [&] (uint64_t f) {
+            return f < change ? on (f) : song (true, (double) change / beat + (double) (f - change) / beat * 0.75, 90.0);
+        };
+        compare ("the tempo changed", clocks, slower, sleep, late, block);
+        const uint64_t stop = at (6.2 * beat);
+        compare ("a Stop", clocks, [&] (uint64_t f) { return f < stop ? on (f) : song (false, (double) stop / beat); }, sleep, stop, block);
+        compare ("a Stop after the tempo changed", clocks,
+                 [&] (uint64_t f) { return f < stop ? slower (f) : song (false, slower (stop).beats, 90.0); }, sleep, stop, block);
+        compare ("a locate back", clocks, [&] (uint64_t f) { return f < stop ? on (f) : song (true, 1.0 + (double) (f - stop) / beat); }, sleep,
+                 stop, block);
+        // A loop from beat 0 to 8, the song started at beat 0.37: it goes round inside a block of 100, told at the next.
+        auto round = [&] (uint64_t f) { return looped (song (true, std::fmod (0.37 + (double) f / beat, 8.0)), 0.0, 8.0); };
+        const uint64_t turn = at ((8.0 - 0.37) * beat + block - 1);
+        compare ("the loop going round", clocks, round, sleep, turn, block);
+        auto slowerRound = [&] (uint64_t f) {
+            const Engine::SongNow s = slower (f);
+            return looped (song (true, std::fmod (s.beats, 8.0), s.bpm), 0.0, 8.0);
+        };
+        const uint64_t slowerTurn = at ((double) change + (8.0 - (double) change / beat) * beat / 0.75 + block - 1);
+        compare ("the loop going round after the tempo changed", clocks, slowerRound, sleep, slowerTurn, block);
+        // The LFO: free, the song stopped; synced to 1/4T, playing and stopped.
+        auto stopped = [&] (uint64_t) { return song (false, 0.0); };
+        compare ("a free LFO", { { ParamId::lfoRate, 0.5f } }, stopped, sleep, late, block);
+        compare ("a synced LFO, playing", { { ParamId::lfoSync, 8 } }, on, sleep, late, block);
+        compare ("a synced LFO, stopped", { { ParamId::lfoSync, 8 } }, stopped, sleep, late, block, false);
+    }
+    {
+        Engine e;
+        made (e, clocks);
+        play (e, 0, 128 * 100, [&] (uint64_t f) { return song (true, (double) f / beat); }, 128);
+        e.slept (~0ull, song (true, 1e15)); // a hostile host: the longest sleep counted, a place past any song's
+        play (e, 128 * 100, 128 * 200, [&] (uint64_t f) { return song (true, (double) f / beat); }, 128);
+        CHECK (std::isfinite (e.lfoPlace()) && e.sequencer().pos >= 0 && e.sequencer().pos < 11);
+    }
+}
+
 void testFilterSettings()
 {
     const Stereo x = loop (48000.0, 1.0);
@@ -1381,6 +1486,7 @@ int main()
     testSequencer();
     testSequencerEngine();
     testClockGaps();
+    testSlept();
     testFilterSettings();
     testTextEdges();
     testVerifiedFixes();

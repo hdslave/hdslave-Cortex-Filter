@@ -41,6 +41,7 @@ struct Plugin
     float applied[paramCount] {};
     Engine engine;
     bool active = false;
+    int64_t steadyNext = -1; // the steady_time a call after the last one has if the host ran every frame (-1: unknown)
     const clap_host_params* hostParams = nullptr;
     // Melodee's screen (melodee_screen.h): the page, what the audio thread tells it, the values it changed (told to
     // the host from the next process or flush, a bit a row) and whether an input asked for a paint now.
@@ -513,6 +514,7 @@ bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t 
     for (uint32_t i = 0; i < paramCount; ++i) // values the host set while inactive: in place before the glides settle
         p.applied[i] = p.values[i].load (std::memory_order_relaxed), p.engine.set (paramTable[i].id, p.applied[i]);
     p.engine.prepare (rate, maxFrames);
+    p.steadyNext = -1; // a new run: no sleep to count before its first block
     p.commands.keepFor ((float) rate);
     p.feed.rate.store ((float) rate, std::memory_order_relaxed);
     p.active = true;
@@ -534,6 +536,7 @@ void pluginReset (const clap_plugin* plugin)
     auto& p = of (plugin);
     p.commands.clear();
     p.engine.reset();
+    p.steadyNext = -1;
 }
 
 // Denormals: flush them to zero for the block (the filters ring down into them), as the FPU had it after.
@@ -549,6 +552,23 @@ struct FlushDenormals
     ~FlushDenormals() { __builtin_ia32_ldmxcsr (saved); }
 #endif
 };
+
+// The host's transport as the engine takes it: no transport is the song stopped at 120 bpm; the loop only while one
+// is told.
+Engine::SongNow songOf (const clap_event_transport* t)
+{
+    Engine::SongNow s;
+    if (t == nullptr)
+        return s;
+    s.playing = (t->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
+    s.placed = (t->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE) != 0;
+    s.bpm = (t->flags & CLAP_TRANSPORT_HAS_TEMPO) && std::isfinite (t->tempo) && t->tempo > 0.0 ? std::clamp (t->tempo, 1.0, 1000.0) : 120.0;
+    s.beats = s.placed ? (double) t->song_pos_beats / (double) CLAP_BEATTIME_FACTOR : 0.0;
+    s.looping = s.placed && (t->flags & CLAP_TRANSPORT_IS_LOOP_ACTIVE) != 0;
+    if (s.looping)
+        s.loopStart = (double) t->loop_start_beats / (double) CLAP_BEATTIME_FACTOR, s.loopEnd = (double) t->loop_end_beats / (double) CLAP_BEATTIME_FACTOR;
+    return s;
+}
 
 clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process* process)
 {
@@ -569,6 +589,16 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         inL = process->audio_inputs[0].data32[0];
         inR = process->audio_inputs[0].channel_count > 1 ? process->audio_inputs[0].data32[1] : nullptr;
     }
+
+    // Frames the host let it sleep through since its last call: CLAP's steady_time counts on by more than the last
+    // call's frames (hdslaveOS from 0.8.3-hdslave.4 counts the frames it skips). The sound moves on by them first, as
+    // it would have run every block, before this block's values, events and transport (Engine::slept). A host whose
+    // steady_time stands still while asleep, or that has none (-1), tells no sleep.
+    const Engine::SongNow song = songOf (process->transport);
+    const int64_t steady = process->steady_time;
+    if (steady >= 0 && p.steadyNext >= 0 && steady > p.steadyNext)
+        p.engine.slept ((uint64_t) (steady - p.steadyNext), song);
+    p.steadyNext = steady >= 0 && steady <= INT64_MAX - (int64_t) frames ? steady + (int64_t) frames : -1;
 
     // Values the main thread changed (a state loaded while playing, the page): looked through only when it wrote some.
     if (p.mainChanged.exchange (false, std::memory_order_acquire))
@@ -597,16 +627,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
                 p.engine.trigger (kind, (uint32_t) amount);
         });
 
-    if (const auto* t = process->transport)
-    {
-        const bool playing = (t->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
-        const bool placed = (t->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE) != 0;
-        const double bpm = (t->flags & CLAP_TRANSPORT_HAS_TEMPO) && std::isfinite (t->tempo) && t->tempo > 0.0
-                               ? std::clamp (t->tempo, 1.0, 1000.0) : 120.0;
-        p.engine.transport (playing, placed, placed ? (double) t->song_pos_beats / (double) CLAP_BEATTIME_FACTOR : 0.0, bpm);
-    }
-    else
-        p.engine.transport (false, false, 0.0, 120.0);
+    p.engine.transport (song.playing, song.placed, song.beats, song.bpm);
 
     // The page's input and output meters, only while it is being painted: the loudest sample of each side.
     const bool metering = p.feed.frames.load (std::memory_order_relaxed) < p.meterUntilFrame.load (std::memory_order_relaxed);
