@@ -8,6 +8,10 @@ Separate desktop CLAP build of **hdslave Cortex Filter** for **FL Studio** (2024
 - **The same plug-in as the MPC build:** `src/` here is the MPC plug-in's `../src` plus this panel's own edits, so the sound, the parameters (46), the presets (15) and the saved state (version 2) are the MPC build's. The version the bundle reports is read from `src/params.h`, the same line the MPC build uses.
 - **Standalone from the MPC Sample build:** the build itself is this directory's own (`./build-macos.sh`, `./build-windows.ps1`); the MPC build stays `../build.sh`. GitHub releases remain MPC Sample-only for now while the desktop builds are being finalized.
 
+## hdslave plug-in license
+
+You may use these plug-ins to make, perform, record and sell music, including paid client work, without royalties or credit to hdslave. You may share complete, unchanged official releases for free with their notices intact. Selling the software, including it in a paid product or subscription, or distributing a modified version requires prior written permission from hdslave. Third-party components keep their own licenses. [Full plug-in license](../LICENSE.txt).
+
 ## Keeping it in step with the MPC plug-in
 
 `src/` is a copy, so it goes stale whenever the MPC plug-in changes. `desktop-fork.patch` holds the only differences — the page's `K1`–`K3` footer and legend removed, 9-row lists with pinned tops, the "click or drag" text, and the tiles extension the panel draws from. Re-sync and rebuild in one step:
