@@ -4,16 +4,18 @@
 
 <table>
   <tr>
-    <th width="34%">MPC Sample</th>
-    <th width="66%">macOS and Windows · CLAP</th>
+    <th width="25%">MPC Sample</th>
+    <th width="48%">macOS and Windows · CLAP</th>
+    <th width="27%">SP-16 · freesp16</th>
   </tr>
   <tr>
-    <td align="center"><a href="docs/cortex-filter-screen.gif"><img src="docs/cortex-filter-screen.gif" alt="Cortex Filter 3D morphing cube and waterfall screen running in hdslaveOS"></a></td>
-    <td align="center"><a href="mac-clap/assets/desktop-preview.gif"><img src="mac-clap/assets/desktop-preview.gif" alt="Cortex Filter morphing cubes and filter response during playback"></a></td>
+    <td align="center"><a href="docs/cortex-filter-screen.webp"><img src="docs/mpc-loop.webp" alt="Cortex Filter 3D morphing cube and waterfall screen running in hdslaveOS"></a></td>
+    <td align="center"><a href="mac-clap/assets/desktop-preview.webp"><img src="mac-clap/assets/desktop-loop.webp" alt="Cortex Filter morphing cubes and filter response during playback"></a></td>
+    <td align="center"><a href="docs/cortex-sp16.webp"><img src="docs/cortex-sp16-loop.webp" alt="Cortex Filter on SP-16. Dragging inside the morph cube changes the filter response."></a></td>
   </tr>
 </table>
 
-> **Desktop CLAP version (macOS & Windows):** A separate desktop CLAP build with all MPC screens on one interactive panel lives in [**`mac-clap/`**](mac-clap/) (`cd mac-clap && ./install-macos.sh`). Releases in this repo stay MPC Sample-only for now while the desktop builds are being finalized.
+> **Desktop CLAP version (macOS & Windows):** A separate desktop CLAP build with all MPC screens on one interactive panel lives in [**`mac-clap/`**](mac-clap/) (`cd mac-clap && ./install-macos.sh`).
 
 Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melodee-sample) / [hdslaveOS](https://github.com/hdslave/hdslaveOS) (64-bit ARM Linux, Cortex-A55). Hosts list it as **hdslave Cortex Filter** (id `com.hdslave.cortex-filter`). Inspired by classic "filter cube" morphing filters (E-mu's Z-plane filters and Rossum Electro-Music's Morpheus module), eight complex filters sit at the corners of a 3D cube while **Morph (X)**, **Freq (Y)**, and **Transform (Z)** smoothly navigate anywhere inside it. All cubes, filters, and factory sequences are original designs.
 
