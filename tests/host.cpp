@@ -8,6 +8,7 @@
 #include "signal.h"
 #include "wav.h"
 #include "../src/melodee_screen.h"
+#include "../src/sixteen_screen.h"
 #include "../src/filters.h"
 #include "../src/morph.h"
 #include "../src/presets.h"
@@ -1643,6 +1644,106 @@ void testLatencyTailAndSleep()
     CHECK (woke.l == expected.l && woke.r == expected.r);
 }
 
+// The SP-16 editor (org.sixteen.screen/1): its pages, the six encoders it names, and edits by touch.
+void testSixteenScreen (const std::string& folder)
+{
+    Instance a;
+    const auto* ext = static_cast<const sixteen_plugin_screen_t*> (a.plugin->get_extension (a.plugin, SIXTEEN_EXT_SCREEN));
+    CHECK (ext != nullptr && ext->render != nullptr && ext->touch != nullptr && ext->selector_turn != nullptr
+           && ext->selector_push != nullptr && ext->knobs != nullptr);
+    if (ext == nullptr)
+        return;
+    uint32_t ids[6] = {};
+    char tab[SIXTEEN_TAB_NAME_SIZE] = {};
+    auto known = [&] (uint32_t id) {
+        if (id == SIXTEEN_INVALID_PARAM_ID)
+            return true;
+        for (const auto& [name, have] : a.ids)
+            if (have == id)
+                return true;
+        return false;
+    };
+    CHECK (ext->knobs (a.plugin, ids, tab));
+    CHECK (std::strcmp (tab, "CORTEX - CUBE") == 0);
+    CHECK (ids[0] == a.id ("Morph") && ids[1] == a.id ("Freq") && ids[2] == a.id ("Transform"));
+    CHECK (ids[3] == a.id ("Emphasis") && ids[4] == a.id ("Filter") && ids[5] == a.id ("Glide"));
+    // The editor is made on its first paint; a touch before it is not taken.
+    CHECK (! ext->touch (a.plugin, SIXTEEN_TOUCH_DOWN, 100, 150));
+
+    std::vector<uint32_t> pixels ((size_t) SIXTEEN_SCREEN_WIDTH * SIXTEEN_SCREEN_HEIGHT, 0);
+    sixteen_screen_surface_t surf {};
+    surf.pixels = pixels.data();
+    surf.width = SIXTEEN_SCREEN_WIDTH, surf.height = SIXTEEN_SCREEN_HEIGHT, surf.stride = SIXTEEN_SCREEN_WIDTH;
+    surf.now_ms = 1000;
+    CHECK (ext->render (a.plugin, &surf, true));
+    CHECK (std::none_of (pixels.begin(), pixels.end(), [] (uint32_t px) { return (px >> 24) != 0xff; })); // all of it, opaque
+    CHECK (writePng ((folder + "/screen-sp16-cube.png").c_str(), pixels.data(), surf.width, surf.height, surf.stride, 1));
+
+    // Each tab opens its page and names its encoders, every one a parameter or empty.
+    const char* pages[8] = { "CUBE", "FILTER", "SEQ", "TRIG", "KNOBS", "LFO", "ENV", "OUT" };
+    const char* files[8] = { "cube", "filter", "seq", "trig", "knobs", "lfo", "env", "out" };
+    for (int i = 7; i >= 0; --i)
+    {
+        const auto before = pixels;
+        CHECK (ext->touch (a.plugin, SIXTEEN_TOUCH_DOWN, 218 + i * 70 + 30, 24));
+        ext->touch (a.plugin, SIXTEEN_TOUCH_UP, 218 + i * 70 + 30, 24);
+        CHECK (ext->knobs (a.plugin, ids, tab));
+        CHECK (std::string (tab) == std::string ("CORTEX - ") + pages[i]);
+        int bound = 0;
+        for (const uint32_t id : ids)
+        {
+            CHECK (known (id));
+            bound += id != SIXTEEN_INVALID_PARAM_ID;
+        }
+        CHECK (bound >= 4);
+        surf.now_ms += 40;
+        CHECK (ext->render (a.plugin, &surf, false));
+        CHECK (pixels != before);
+        if (i > 0)
+            CHECK (writePng ((folder + "/screen-sp16-" + files[i] + ".png").c_str(), pixels.data(), surf.width, surf.height, surf.stride, 1));
+    }
+    CHECK (std::strcmp (tab, "CORTEX - CUBE") == 0);
+
+    // Dragging in the cube moves Morph across and Freq up, from where they were.
+    const double morph0 = a.value ("Morph"), freq0 = a.value ("Freq");
+    CHECK (ext->touch (a.plugin, SIXTEEN_TOUCH_DOWN, 100, 150));
+    CHECK (ext->touch (a.plugin, SIXTEEN_TOUCH_MOVE, 150, 150));
+    NEAR (a.value ("Morph"), morph0 + 50.0 / 192.0, 1e-6);
+    NEAR (a.value ("Freq"), freq0, 1e-9);
+    CHECK (ext->touch (a.plugin, SIXTEEN_TOUCH_MOVE, 150, 100));
+    NEAR (a.value ("Freq"), std::min (1.0, freq0 + 50.0 / 177.0), 1e-6);
+    CHECK (ext->touch (a.plugin, SIXTEEN_TOUCH_UP, 150, 100));
+    const double morph1 = a.value ("Morph");
+
+    // Dragging a card up 65 pixels adds half its range: the first card is Morph.
+    CHECK (ext->touch (a.plugin, SIXTEEN_TOUCH_DOWN, 520, 70));
+    CHECK (ext->touch (a.plugin, SIXTEEN_TOUCH_MOVE, 520, 5));
+    NEAR (a.value ("Morph"), std::min (1.0, morph1 + 0.5), 1e-6);
+    CHECK (ext->touch (a.plugin, SIXTEEN_TOUCH_UP, 520, 5));
+    // Outside the body's controls (the strip below the tabs, right of the plot) a touch is not taken.
+    CHECK (! ext->touch (a.plugin, SIXTEEN_TOUCH_DOWN, 100, 56));
+    CHECK (! ext->touch (a.plugin, SIXTEEN_TOUCH_DOWN, 503, 150));
+
+    surf.now_ms += 40;
+    CHECK (ext->render (a.plugin, &surf, false));
+    // Left alone past its four awake seconds, with no sound and nothing moving, the page stops repainting.
+    surf.now_ms += 5000;
+    ext->render (a.plugin, &surf, false);
+    surf.now_ms += 40;
+    CHECK (! ext->render (a.plugin, &surf, false));
+    surf.now_ms += 40;
+    CHECK (! ext->render (a.plugin, &surf, false));
+    // A full paint redraws the same picture, apart from the wordmark: a full paint wakes the page, and its title moves
+    // while the page is awake.
+    const auto settled = pixels;
+    CHECK (ext->render (a.plugin, &surf, true));
+    bool same = true;
+    for (int y = 0; y < surf.height; ++y)
+        for (int x = y < 54 ? 218 : 0; x < surf.width; ++x)
+            same &= pixels[y * surf.stride + x] == settled[y * surf.stride + x];
+    CHECK (same);
+}
+
 int main (int argc, char** argv)
 {
     if (argc < 3)
@@ -1680,6 +1781,7 @@ int main (int argc, char** argv)
     demos (folder);
     testScreen (folder);
     testFxStrip (folder);
+    testSixteenScreen (folder);
     entry->deinit();
     std::printf ("host: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

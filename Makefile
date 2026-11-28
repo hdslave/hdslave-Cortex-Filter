@@ -81,3 +81,14 @@ sp16: $(OUT)/sp16/CortexFilter.clap
 $(OUT)/sp16/CortexFilter.clap: $(SOURCES) $(HEADERS) src/exports.map Makefile
 	@mkdir -p $(@D)
 	$(SP16_CXX) $(filter-out -mcpu=cortex-a55,$(CXXFLAGS)) -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=softfp $(SOURCES) $(LDFLAGS) -o $@
+
+# The host tests on the device object, under qemu-arm as a Cortex-A9 with the toolchain's glibc 2.13 sysroot, also in
+# sp16-toolchain:gcc11-egl. The test program links libstdc++ statically: the sysroot's is older than GCC 11's.
+# Pictures go to build/sp16/.
+.PHONY: sp16-test
+$(OUT)/sp16/host: tests/host.cpp tests/wav.h tests/png.h tests/signal.h $(HEADERS) Makefile
+	@mkdir -p $(@D)
+	$(SP16_CXX) $(TESTFLAGS) -Wno-psabi tests/host.cpp -static-libstdc++ -static-libgcc -ldl -o $@
+sp16-test: $(OUT)/sp16/CortexFilter.clap $(OUT)/sp16/host
+	sp16-check-glibc $(OUT)/sp16/CortexFilter.clap
+	qemu-arm -cpu cortex-a9 -L /opt/sp16/sysroot $(OUT)/sp16/host $(OUT)/sp16/CortexFilter.clap $(OUT)/sp16
