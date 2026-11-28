@@ -85,11 +85,16 @@ build before 0.8.3-hdslave.4), it behaves as 0.3.3. Also fixed in 0.3.4, always 
 
 The sound is otherwise 0.3.3's to the bit.
 
+**Version 0.3.5** adds the SP-16 build and its editor below, on 0.3.4's engine, so one version runs on both
+instruments. On the MPC the page and the sound are unchanged: every fingerprint hash holds.
+
 ## SP-16 effect editor
 
 Choose **Plugin** in an FX1, FX2, Send or Master slot and select **Cortex Filter**. The effect opens on its Cube page. Drag in the cube to change Morph and Frequency, or use the six parameter cards and the matching encoders. Tap the response plot on Cube to switch between time history and the morph landscape. Page tabs lead to the filter bank, sequence, triggers, modulation and output. Swipe a list to browse, then tap its selected row to edit. The selector turns and presses work on the active page. **SLOT MIX** opens the host wet/dry control and **EDITOR** returns to Cortex.
 
 The Linux desktop test build is `build/CortexFilter.clap` from `./build.sh`. With the freesp16 ARM toolchain, `make sp16` produces `build/sp16/CortexFilter.clap` for the SP-16 Plugins directory. Both use the same CLAP ID and project state. The editor uses Barlow on its touch controls, licensed under the SIL Open Font License in `licenses/OFL-barlow.txt`.
+
+The download is `hdslave-Cortex-Filter-freesp16-0.3.5.zip` in [release 0.3.5](https://github.com/hdslave/hdslave-Cortex-Filter/releases/tag/v0.3.5). Unzip it at the root of the USB stick the app starts from: `CortexFilter.clap` then sits in `freesp16-data/freesp16/Plugins/`. The object is ARMv7-A, softfp, glibc 2.13, and it needs only `libm` and `libc`. The host tests, the editor's included, pass on it under qemu-arm as a Cortex-A9 (`make sp16-test` in freesp16's toolchain image `sp16-toolchain:gcc11-egl`). It has not been run on a unit yet.
 
 ## Signal flow
 
