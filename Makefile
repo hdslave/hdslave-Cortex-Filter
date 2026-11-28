@@ -73,3 +73,11 @@ sanitize:
 
 clean:
 	rm -rf $(OUT)
+
+# SP-16 device build with the freesp16 toolchain. The desktop host loads the regular Linux build.
+SP16_CXX ?= arm-linux-gnueabi-g++
+.PHONY: sp16
+sp16: $(OUT)/sp16/CortexFilter.clap
+$(OUT)/sp16/CortexFilter.clap: $(SOURCES) $(HEADERS) src/exports.map Makefile
+	@mkdir -p $(@D)
+	$(SP16_CXX) $(filter-out -mcpu=cortex-a55,$(CXXFLAGS)) -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=softfp $(SOURCES) $(LDFLAGS) -o $@

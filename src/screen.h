@@ -43,7 +43,8 @@ struct Feed
     std::atomic<bool> drives { false };
     std::atomic<float> control[3] {};
     std::atomic<float> meters[6] {}; // input L/R, distortion L/R, output L/R
-    std::atomic<uint32_t> blocks { 0 };
+    std::atomic<uint32_t> blocks { 0 }, audibleBlocks { 0 };
+    std::atomic<uint64_t> watchAudioUntil { 0 }; // SP-16 keeps calling process even while silent
     std::atomic<uint64_t> frames { 0 }; // frames rendered, so a second is a second at any block size
 };
 
@@ -138,8 +139,11 @@ inline void designCube (int cube, const Position& p, float emphasis, float rate,
         design (cubeTable (cube), p, emphasis, rate, d);
 }
 
+namespace sp16 { struct Editor; }
+
 class Screen final : public hdui::Page
 {
+    friend struct sp16::Editor;
 public:
     // The page's own buttons on FILTER (not parameters).
     static constexpr uint32_t copyButton = 1000, restoreButton = 1001;
@@ -159,6 +163,36 @@ public:
         groupList[6] = { "ENV", envelope, 6 }, groupList[7] = { "OUT", out, 4 };
     }
 
+    // Direct group and row selection on the SP-16 touchscreen uses the same cursor as the selector.
+    void selectGroup (int group)
+    {
+        if (group < 0 || group >= groupCount() || current == group) return;
+        current = group;
+        editing = editingStep = restoreArmed = seqRestoreArmed = false;
+    }
+
+    const char* groupName (int i) const { return groupAt(i).name; }
+
+    void sixKnobs (uint32_t ids[6]) const
+    {
+        using namespace ParamId;
+        std::fill_n (ids, 6, hdui::noParam);
+        if (current == cubeGroup || current == seqGroup)
+        {
+            static constexpr uint32_t cubeIds[6] = {morph, freq, transform, emphasis, filter, glide};
+            static constexpr uint32_t seqIds[6] = {sequence, incClock, decClock, resetClock, envTrigger, trigLevel};
+            std::copy_n (current == cubeGroup ? cubeIds : seqIds, 6, ids);
+            return;
+        }
+        const auto& g = group();
+        const int start = (cursor[current] / 6) * 6;
+        for (int i = 0; i < 6 && start + i < g.count; ++i)
+        {
+            const auto id = g.fields[start + i].id;
+            if (paramIndex(id) >= 0) ids[i] = id;
+        }
+    }
+
     bool inFxChain = false; // the chain strip shows a single response, independent of the full page’s TIME/MORPH setting
 
     // The graphs move by themselves: sound ran through the filter lately, or MORPH view's landscape is still catching
@@ -175,7 +209,9 @@ public:
 
     bool bodyAtRest (const hdui::Host& h) const { return ! newBlocks() && ! animating (h); }
     // The sound ran a block the page has not shown yet.
-    bool newBlocks() const { return feed.blocks.load (std::memory_order_acquire) != seenBlocks; }
+    bool useAudibleBlocks = false;
+    uint32_t activityBlocks() const { return (useAudibleBlocks ? feed.audibleBlocks : feed.blocks).load (std::memory_order_acquire); }
+    bool newBlocks() const { return activityBlocks() != seenBlocks; }
 
     // The page is awake for awakeMs from the last time it was woken (it opened, an input, a value or a knob changed,
     // sound ran; cortex.cpp). The title moves while it is awake or anything else moves (the graphs, the song playing;
@@ -198,7 +234,7 @@ public:
     // The audio thread's news and the animation's step, before each paint.
     void update (uint64_t nowMs)
     {
-        const uint32_t blocks = feed.blocks.load (std::memory_order_acquire);
+        const uint32_t blocks = activityBlocks();
         if (blocks != seenBlocks)
             seenBlocks = blocks, lastBlockMs = nowMs, heard = true;
         live = heard && nowMs - lastBlockMs < liveMs;
@@ -849,6 +885,28 @@ private:
         }
     }
 
+    void updateMorphSlices()
+    {
+        const int cube = store.cubeOf (slotNow);
+        const float emphasis = value (ParamId::emphasis), level = levelOf (slotNow);
+        const bool reshaped = cube != morphCube || emphasis != morphEmphasis || rate != morphRate;
+        const int start = morphNext;
+        for (int k = 0, budget = reshaped ? morphSlices : 3; k < morphSlices && budget > 0; ++k)
+        {
+            const int s = (start + k) % morphSlices;
+            if (! reshaped && morphAt[s].y == pointL.y && morphAt[s].z == pointL.z)
+                continue;
+            Design d;
+            designCube (cube, { (float) s / (morphSlices - 1), pointL.y, pointL.z }, emphasis, rate, d);
+            for (int i = 0; i < cols; ++i)
+                morphDb[s][i] = responseDbAt (d, columnT[i]) + level;
+            morphAt[s] = { 0.0f, pointL.y, pointL.z };
+            morphNext = (s + 1) % morphSlices;
+            --budget;
+        }
+        morphCube = cube, morphEmphasis = emphasis, morphRate = rate;
+    }
+
     void drawWaterfall (hdui::Raster& r, const hdui::Host& h, int x0, int base)
     {
         const hdui::Ink hi = accent (h);
@@ -869,24 +927,7 @@ private:
             // MORPH: the Morph axis from 0 (front) to 1 (back), the response now lit where it is.
             // The landscape follows Freq and Transform a few slices a frame (all of it within four frames), so a
             // moving point costs a few responses a frame, not twelve; a new cube, Emphasis or rate redraws it at once.
-            const int cube = store.cubeOf (slotNow);
-            const float emphasis = value (ParamId::emphasis), level = levelOf (slotNow);
-            const bool reshaped = cube != morphCube || emphasis != morphEmphasis || rate != morphRate;
-            const int start = morphNext;
-            for (int k = 0, budget = reshaped ? morphSlices : 3; k < morphSlices && budget > 0; ++k)
-            {
-                const int s = (start + k) % morphSlices;
-                if (! reshaped && morphAt[s].y == pointL.y && morphAt[s].z == pointL.z)
-                    continue;
-                Design d;
-                designCube (cube, { (float) s / (morphSlices - 1), pointL.y, pointL.z }, emphasis, rate, d);
-                for (int i = 0; i < cols; ++i)
-                    morphDb[s][i] = responseDbAt (d, columnT[i]) + level;
-                morphAt[s] = { 0.0f, pointL.y, pointL.z };
-                morphNext = (s + 1) % morphSlices;
-                --budget;
-            }
-            morphCube = cube, morphEmphasis = emphasis, morphRate = rate;
+            updateMorphSlices();
             const float now = pointL.x;
             bool nowDrawn = false;
             for (int s = 0; s < morphSlices; ++s) // front to back, the response now where it sits among them
