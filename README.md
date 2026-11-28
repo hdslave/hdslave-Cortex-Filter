@@ -90,6 +90,10 @@ The sound is otherwise 0.3.3's to the bit.
 **Version 0.3.5** adds the SP-16 build and its editor below, on 0.3.4's engine, so one version runs on both
 instruments. On the MPC the page and the sound are unchanged: every fingerprint hash holds.
 
+## hdslave plug-in license
+
+You may use these plug-ins to make, perform, record and sell music, including paid client work, without royalties or credit to hdslave. You may share complete, unchanged official releases for free with their notices intact. Selling the software, including it in a paid product or subscription, or distributing a modified version requires prior written permission from hdslave. Third-party components keep their own licenses. [Full plug-in license](LICENSE.txt).
+
 ## SP-16 effect editor
 
 Choose **Plugin** in an FX1, FX2, Send or Master slot and select **Cortex Filter**. The effect opens on its Cube page. Drag in the cube to change Morph and Frequency, or use the six parameter cards and the matching encoders. Tap the response plot on Cube to switch between time history and the morph landscape. Page tabs lead to the filter bank, sequence, triggers, modulation and output. Swipe a list to browse, then tap its selected row to edit. The selector turns and presses work on the active page. **SLOT MIX** opens the host wet/dry control and **EDITOR** returns to Cortex.
