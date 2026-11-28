@@ -100,7 +100,7 @@ Choose **Plugin** in an FX1, FX2, Send or Master slot and select **Cortex Filter
 
 The Linux desktop test build is `build/CortexFilter.clap` from `./build.sh`. With the freesp16 ARM toolchain, `make sp16` produces `build/sp16/CortexFilter.clap` for the SP-16 Plugins directory. Both use the same CLAP ID and project state. The editor uses Barlow on its touch controls, licensed under the SIL Open Font License in `licenses/OFL-barlow.txt`.
 
-The download is `hdslave-Cortex-Filter-freesp16-0.3.5.zip` in [release 0.3.5](https://github.com/hdslave/hdslave-Cortex-Filter/releases/tag/v0.3.5). Unzip it at the root of the USB stick the app starts from: `CortexFilter.clap` then sits in `freesp16-data/freesp16/Plugins/`. The object is ARMv7-A, softfp, glibc 2.13, and it needs only `libm` and `libc`. The host tests, the editor's included, pass on it under qemu-arm as a Cortex-A9 (`make sp16-test` in freesp16's toolchain image `sp16-toolchain:gcc11-egl`). It has not been run on a unit yet.
+The download is `hdslave-Cortex-Filter-freesp16-0.3.5.zip` in [release 0.3.5](https://github.com/hdslave/hdslave-Cortex-Filter/releases/tag/v0.3.5). Unzip it at the root of the USB stick the app starts from: `CortexFilter.clap` then sits in `Plugins/`, the plug-in folder every app on the stick shares (builds made before 2026-11-28 read `freesp16-data/freesp16/Plugins/` instead). The object is ARMv7-A, softfp, glibc 2.13, and it needs only `libm` and `libc`. The host tests, the editor's included, pass on it under qemu-arm as a Cortex-A9 (`make sp16-test` in freesp16's toolchain image `sp16-toolchain:gcc11-egl`). It has not been run on a unit yet.
 
 ## Signal flow
 
