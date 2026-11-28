@@ -22,6 +22,10 @@ envelope follower curve, high-Emphasis peak compensation on resonant LP/HP cubes
 tenors in Vowels, low-passed modal Resonators with musical Qs, non-crossing Shepard Swirl, active mid-cube Harmonic
 Comb, non-colliding Acid Twins, and stronger baseline levels).
 
+## hdslave plug-in license
+
+You may use these plug-ins to make, perform, record and sell music, including paid client work, without royalties or credit to hdslave. You may share complete, unchanged official releases for free with their notices intact. Selling the software, including it in a paid product or subscription, or distributing a modified version requires prior written permission from hdslave. Third-party components keep their own licenses. [Full plug-in license](LICENSE.txt).
+
 ## Signal flow
 
 ```

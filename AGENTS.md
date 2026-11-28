@@ -44,3 +44,7 @@ Read `../AGENTS.md`, then `../Workflow/plugins.md` and `../Workflow/host-facts.m
 - **The response curve is exact.** `responseDb` in `src/morph.h` is exact for the filter, and `tests/host.cpp` holds the measured response to it, so the page draws what is heard.
 - `tests/engine.cpp` holds the engine-level checks. `tools/levels.sh`, `balance.sh` and `artifacts.sh` measure levels, preset balance and control-rate artifacts.
 - Glides and gain smoothers snap once a step no longer moves the float. After a state load, the next block settles them.
+
+## Release packaging
+
+Every release ZIP includes the full repository `LICENSE.txt` beside the third-party notices, outside signed plug-in bundles. Preserve both when packaging the plug-in for another project.
