@@ -85,6 +85,12 @@ build before 0.8.3-hdslave.4), it behaves as 0.3.3. Also fixed in 0.3.4, always 
 
 The sound is otherwise 0.3.3's to the bit.
 
+## SP-16 effect editor
+
+Choose **Plugin** in an FX1, FX2, Send or Master slot and select **Cortex Filter**. The effect opens on its Cube page. Drag in the cube to change Morph and Frequency, or use the six parameter cards and the matching encoders. Tap the response plot on Cube to switch between time history and the morph landscape. Page tabs lead to the filter bank, sequence, triggers, modulation and output. Swipe a list to browse, then tap its selected row to edit. The selector turns and presses work on the active page. **SLOT MIX** opens the host wet/dry control and **EDITOR** returns to Cortex.
+
+The Linux desktop test build is `build/CortexFilter.clap` from `./build.sh`. With the freesp16 ARM toolchain, `make sp16` produces `build/sp16/CortexFilter.clap` for the SP-16 Plugins directory. Both use the same CLAP ID and project state. The editor uses Barlow on its touch controls, licensed under the SIL Open Font License in `licenses/OFL-barlow.txt`.
+
 ## Signal flow
 
 ```

@@ -7,6 +7,8 @@
 #include "presets.h"
 #include "screen.h"
 #include "melodee_screen.h"
+#include "screen_sp16.h"
+#include <memory>
 
 #include <clap/clap.h>
 
@@ -56,6 +58,7 @@ struct Plugin
     Feed feed;
     Commands commands;
     Screen screen { values, feed, engine.bank(), commands };
+    std::unique_ptr<sp16::Editor> sp16Editor; // allocated only when its surface is drawn
     std::atomic<uint64_t> outgoing { 0 };
     std::atomic<bool> paintAsked { false };
     std::atomic<uint64_t> meterUntilFrame { 0 }; // the page's meters are kept up until this frame (a second after a paint)
@@ -610,7 +613,7 @@ bool overQuiet (const float* x, uint32_t n)
 clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process* process)
 {
     auto& p = of (plugin);
-    FlushDenormals flush;
+    [[maybe_unused]] FlushDenormals flush;
     const uint32_t frames = process->frames_count;
     if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 1 || process->audio_outputs[0].data32 == nullptr
         || process->audio_outputs[0].data32[0] == nullptr
@@ -713,7 +716,8 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         return m;
     };
     float meters[6] = {};
-    if (metering) // before the sound: the output may be the input's buffers
+    const bool watching = p.feed.frames.load (std::memory_order_relaxed) < p.feed.watchAudioUntil.load (std::memory_order_relaxed);
+    if (metering || watching) // before the sound: the output may be the input's buffers
         meters[0] = peak (inL), meters[1] = peak (inR != nullptr ? inR : inL);
 
     uint32_t done = 0;
@@ -770,6 +774,10 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     // runs it then, its input silent or not (hdslaveOS clears the wish as each block starts).
     if (p.engine.keepAwake() && p.host->request_process != nullptr)
         p.host->request_process (p.host), p.askedRun = true; // the host's quiet count restarts before the next block
+    if (watching && ((process->transport && (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING)) ||
+                     std::max (meters[0], meters[1]) > 0.000001f ||
+                     std::max (meters[4], meters[5]) > 0.000001f))
+        p.feed.audibleBlocks.fetch_add (1, std::memory_order_release);
     p.feed.blocks.fetch_add (1, std::memory_order_release);
     p.feed.frames.fetch_add (frames, std::memory_order_release);
     p.commands.tick (frames);
@@ -835,15 +843,8 @@ bool screenDraw (const void* plugin, const melodee_screen_frame_t* c)
     return drew;
 }
 
-bool screenInput (const void* plugin, const melodee_screen_input_t* e)
+void applyScreenEdits (Plugin& p, const hdui::Edits& edits, bool used, uint32_t commandsBefore)
 {
-    if (plugin == nullptr || e == nullptr || e->kind > MELODEE_SCREEN_STEP)
-        return false;
-    auto& p = of (static_cast<const clap_plugin*> (plugin));
-    p.inputSeen.store (true, std::memory_order_release); // wakes the page, even an input it has no use for
-    hdui::Edits edits;
-    const uint32_t commandsBefore = p.commands.count();
-    const bool used = p.screen.input ((hdui::Key) e->kind, e->value, e->shift, edits);
     bool changed = false;
     for (int i = 0; i < edits.count; ++i)
     {
@@ -875,6 +876,18 @@ bool screenInput (const void* plugin, const melodee_screen_input_t* e)
         p.hostScreen->redraw (p.host, (changed || command) ? MELODEE_SCREEN_RUN : 0);
     else if (command && p.host->request_process != nullptr)
         p.host->request_process (p.host);
+}
+
+bool screenInput (const void* plugin, const melodee_screen_input_t* e)
+{
+    if (plugin == nullptr || e == nullptr || e->kind > MELODEE_SCREEN_STEP)
+        return false;
+    auto& p = of (static_cast<const clap_plugin*> (plugin));
+    p.inputSeen.store (true, std::memory_order_release); // wakes the page, even an input it has no use for
+    hdui::Edits edits;
+    const uint32_t commandsBefore = p.commands.count();
+    const bool used = p.screen.input ((hdui::Key) e->kind, e->value, e->shift, edits);
+    applyScreenEdits (p, edits, used, commandsBefore);
     return used;
 }
 
@@ -886,10 +899,67 @@ void screenControls (const void* plugin, uint32_t ids[3])
         ids[k] = chosen[k] == hdui::noParam ? MELODEE_SCREEN_NO_CONTROL : chosen[k];
 }
 
+bool spDraw (const void* plugin, const sixteen_screen_surface_t* out, bool full)
+{
+    if (!plugin || !out || !out->pixels || out->width != SIXTEEN_SCREEN_WIDTH ||
+        out->height != SIXTEEN_SCREEN_HEIGHT || out->stride < out->width) return false;
+    auto& p = of (static_cast<const clap_plugin*>(plugin));
+    if (!p.sp16Editor)
+    {
+        p.sp16Editor.reset (new (std::nothrow) sp16::Editor{});
+        if (!p.sp16Editor) return false;
+        full = true;
+    }
+    const auto frame = p.feed.frames.load (std::memory_order_relaxed);
+    const auto rate = (uint64_t)p.feed.rate.load (std::memory_order_relaxed);
+    p.feed.watchAudioUntil.store (frame + rate, std::memory_order_relaxed);
+    p.meterUntilFrame.store (frame + rate, std::memory_order_relaxed);
+    const bool asked = p.paintAsked.exchange (false, std::memory_order_acq_rel);
+    const bool input = p.inputSeen.exchange (false, std::memory_order_acq_rel);
+    p.screen.useAudibleBlocks = true;
+    const bool drew = p.sp16Editor->paint (*out, p.screen, p.values, asked || input, full);
+    p.screen.useAudibleBlocks = false;
+    return drew;
+}
+
+bool spTouch (const void* plugin, int32_t phase, int32_t x, int32_t y)
+{
+    auto& p = of (static_cast<const clap_plugin*>(plugin));
+    if (!p.sp16Editor) return false;
+    hdui::Edits edits;
+    const auto before = p.commands.count();
+    const bool used = p.sp16Editor->touch (phase, x, y, p.screen, p.values, edits);
+    if (used) p.inputSeen.store (true, std::memory_order_release);
+    applyScreenEdits (p, edits, used, before);
+    return used;
+}
+
+bool spTurn (const void* plugin, int32_t delta)
+{
+    const melodee_screen_input_t input{MELODEE_SCREEN_WHEEL, delta, 0};
+    return screenInput (plugin, &input);
+}
+
+bool spPush (const void* plugin)
+{
+    const melodee_screen_input_t input{MELODEE_SCREEN_PUSH, 1, 0};
+    return screenInput (plugin, &input);
+}
+
+bool spKnobs (const void* plugin, uint32_t* ids, char* tab)
+{
+    auto& screen = of (static_cast<const clap_plugin*>(plugin)).screen;
+    screen.sixKnobs (ids);
+    std::snprintf (tab, SIXTEEN_TAB_NAME_SIZE, "CORTEX - %s", screen.groupName (screen.groupIndex()));
+    return true;
+}
+
+const sixteen_plugin_screen_t spExtension{nullptr, nullptr, spDraw, spTouch, spTurn, spPush, spKnobs};
 const melodee_screen_t screenExtension { screenDraw, screenInput, screenControls };
 
 const void* pluginExtension (const clap_plugin*, const char* id)
 {
+    if (std::strcmp (id, SIXTEEN_EXT_SCREEN) == 0) return &spExtension;
     if (std::strcmp (id, MELODEE_SCREEN_CLAP) == 0) return &screenExtension;
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &paramsExtension;
     if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &stateExtension;
